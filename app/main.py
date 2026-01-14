@@ -27,6 +27,12 @@ LS_SUBPROTOCOL = os.getenv("LS_SUBPROTOCOL", "TLCP-2.5.0.lightstreamer.com")
 LS_ADAPTER_SET = os.getenv("LS_ADAPTER_SET", "SmarthouseFeed")
 LS_DATA_ADAPTER = os.getenv("LS_DATA_ADAPTER", "MDS5")
 
+# "Browser-ähnlicher" Client ID (BNP/Lightstreamer kann hier lizenz-/client-typ-spezifisch sein)
+LS_CID = os.getenv(
+    "LS_CID",
+    "pcYgxn8m8 feOojyA1V661f3g2.pz482h95IL5h",
+)
+
 # Item-Namensschema (Default: X0000010800<ISIN>)
 LS_ITEM_TEMPLATE = os.getenv("LS_ITEM_TEMPLATE", "X0000010800{isin}")
 
@@ -178,7 +184,7 @@ class LightstreamerSession:
         params = (
             f"LS_adapter_set={quote(LS_ADAPTER_SET)}"
             f"&LS_user="
-            f"&LS_cid="
+            f"&LS_cid={quote(LS_CID)}"
             f"&LS_send_sync=false"
             f"&LS_cause=api"
             f"&LS_password="
