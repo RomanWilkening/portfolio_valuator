@@ -49,7 +49,7 @@
     <h2 style="margin-top:0;">Watchlist</h2>
     <div class="muted">Einzelne Werte/Indizes (via ISIN) unabhängig von Portfolios mitreporten.</div>
     <div class="row" style="margin-top: 10px;">
-      <input id="watchIsin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
+      <input id="watchIsin" placeholder="ISIN (12 Zeichen) oder X0000080800586" style="width: 260px;" />
       <input id="watchLabel" placeholder="Label (optional)" style="min-width: 260px;" />
       <button id="addWatchBtn">Hinzufügen</button>
     </div>
@@ -299,7 +299,9 @@
       pf.totalsEl.at.textContent = new Date().toISOString();
     }
 
-    function applyQuoteUpdate(isin, bid, quotetime) {
+    function applyQuoteUpdate(key, bid, quotetime) {
+      if (!key) return;
+      const isin = String(key);
       state.bids.set(isin, Number(bid));
       lastQuoteAtEl.textContent = (quotetime && String(quotetime).trim()) ? String(quotetime) : new Date().toLocaleTimeString();
 
@@ -372,7 +374,7 @@
         }
 
         if (msg.type === "quote") {
-          applyQuoteUpdate(msg.isin, msg.bid, msg.quotetime);
+          applyQuoteUpdate(msg.key || msg.isin, msg.bid, msg.quotetime);
         }
       };
     }

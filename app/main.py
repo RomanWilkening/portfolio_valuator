@@ -45,8 +45,21 @@ LS_USER_AGENT = os.getenv(
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 )
 
-# Für Bewertung benötigen wir nur Bid und Symbol + Zeit (optional).
-SCHEMA_FIELDS: List[str] = ["symbol", "bid", "quotetime"]
+# Für Streaming + Bewertung nutzen wir das „volle“ Schema (wie aus dem Browser beobachtet),
+# damit auch andere Item-Typen (z.B. Indizes) sauber funktionieren.
+SCHEMA_FIELDS: List[str] = [
+    "symbol",
+    "bid",
+    "bidsize",
+    "ask",
+    "asksize",
+    "reference",
+    "last",
+    "quotetime",
+    "vega",
+    "theta",
+    "currentleverage",
+]
 
 
 def now_iso() -> str:
@@ -58,6 +71,30 @@ def validate_isin(isin: str) -> str:
     if not re.fullmatch(r"[A-Z0-9]{12}", isin):
         raise ValueError("ISIN muss 12 Zeichen (A-Z/0-9) sein.")
     return isin
+
+
+def validate_watch_code(code: str) -> str:
+    """
+    Watchlist kann entweder eine ISIN (12 Zeichen) ODER ein BNP/Lightstreamer Item (z.B. X0000080800586) sein.
+    """
+    code = (code or "").strip().upper()
+    if re.fullmatch(r"[A-Z0-9]{12}", code):
+        return code
+    if re.fullmatch(r"X[0-9A-Z]{6,32}", code):
+        return code
+    raise ValueError("Ungültiger Watchlist-Code. Erlaubt: ISIN (12 Zeichen) oder BNP Item-ID (z.B. X0000080800586).")
+
+
+def code_to_ls_item(code: str) -> str:
+    """
+    Mappt einen Watch-/ISIN-Code auf Lightstreamer LS_group Item:
+    - Wenn bereits X... => direkt verwenden
+    - Sonst ISIN => über Template zu X0000010800<ISIN>
+    """
+    code = validate_watch_code(code)
+    if code.startswith("X"):
+        return code
+    return isin_to_item(code)
 
 
 def isin_to_item(isin: str) -> str:
@@ -263,10 +300,10 @@ class LightstreamerSession:
                 out.append(line)
         return out
 
-    def handle_update_line(self, line: str, idx_to_isin: Dict[int, str]) -> Optional[Dict[str, Any]]:
+    def handle_update_line(self, line: str, idx_to_key: Dict[int, str]) -> Optional[Dict[str, Any]]:
         """
         Parst U-Updates und liefert ein Event-Dict zurück:
-        {type:'quote', isin, bid, quotetime}
+        {type:'quote', key, bid, quotetime, symbol}
         """
         if not line.startswith("U,"):
             return None
@@ -283,8 +320,9 @@ class LightstreamerSession:
         decoded = decode_field_values(tokens, SCHEMA_FIELDS, prev)
         self.item_state[item_index] = decoded
 
-        isin = decoded.get("symbol") or idx_to_isin.get(item_index)
-        if not isin:
+        key = idx_to_key.get(item_index)
+        symbol = decoded.get("symbol")
+        if not key and not symbol:
             return None
 
         bid = _try_float(decoded.get("bid"))
@@ -292,7 +330,8 @@ class LightstreamerSession:
         if bid is None:
             return None
 
-        return {"type": "quote", "isin": isin, "bid": bid, "quotetime": qt}
+        # Für Portfolio-Updates ist key typischerweise ISIN. Für Indizes (X...) bleibt key die Item-ID.
+        return {"type": "quote", "key": key or symbol, "isin": symbol or key, "symbol": symbol, "bid": bid, "quotetime": qt}
 
 
 def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dict]], list[str]]:
@@ -346,6 +385,7 @@ def compute_watchlist_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[s
                 "id": it["id"],
                 "label": it.get("label"),
                 "isin": isin,
+                "key": isin,
                 "bid": bids.get(isin),
             }
         )
@@ -418,16 +458,25 @@ class StreamManager:
 
                 portfolios, by_portfolio, portfolio_isins = _load_portfolios_and_positions(_conn)
                 watch = load_watchlist(_conn)
-                watch_isins = [w["isin"] for w in watch]
+                watch_codes = [w["isin"] for w in watch]
 
-                all_isins: List[str] = []
-                seen: set[str] = set()
-                for i in portfolio_isins + watch_isins:
-                    if i not in seen:
-                        seen.add(i)
-                        all_isins.append(i)
+                # Targets: (ls_item, key). key bleibt stabil fürs Frontend (ISIN oder X...).
+                targets: List[tuple[str, str]] = []
+                seen_keys: set[str] = set()
 
-                items = [isin_to_item(i) for i in all_isins]
+                for isin in portfolio_isins:
+                    if isin not in seen_keys:
+                        seen_keys.add(isin)
+                        targets.append((isin_to_item(isin), isin))
+
+                for code in watch_codes:
+                    code = validate_watch_code(code)
+                    if code not in seen_keys:
+                        seen_keys.add(code)
+                        targets.append((code_to_ls_item(code), code))
+
+                items = [t[0] for t in targets]
+                idx_to_key = {idx + 1: t[1] for idx, t in enumerate(targets)}
 
                 if items == last_items and not self._dirty.is_set():
                     # keep current session
@@ -443,11 +492,9 @@ class StreamManager:
                     await asyncio.sleep(1.0)
                     continue
 
-                await self.broadcast({"type": "status", "level": "info", "message": f"Starte Stream für {len(all_isins)} ISIN(s)…"})
+                await self.broadcast({"type": "status", "level": "info", "message": f"Starte Stream für {len(items)} Item(s)…"})
 
                 sess = LightstreamerSession()
-                idx_to_isin = {idx + 1: isin for idx, isin in enumerate(all_isins)}
-
                 await sess.connect()
                 await sess.subscribe_items(items)
                 await self.broadcast({"type": "status", "level": "success", "message": "Stream verbunden."})
@@ -467,13 +514,14 @@ class StreamManager:
                             await self.broadcast({"type": "status", "level": "error", "message": f"Lightstreamer: {line}"})
                             continue
 
-                        evt = sess.handle_update_line(line, idx_to_isin)
+                        evt = sess.handle_update_line(line, idx_to_key)
                         if not evt:
                             continue
 
                         # update cache and broadcast quote
-                        isin = evt["isin"]
-                        self.bids[isin] = float(evt["bid"])
+                        key = evt.get("key") or evt.get("isin")
+                        if key:
+                            self.bids[key] = float(evt["bid"])
                         await self.broadcast(evt)
 
                 try:
@@ -710,7 +758,7 @@ async def list_watchlist() -> List[Dict[str, Any]]:
 
 @app.post("/api/watchlist", status_code=201)
 async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
-    isin = validate_isin(body.isin)
+    isin = validate_watch_code(body.isin)
     label = (body.label or "").strip() or None
     try:
         cur = _conn.execute("INSERT INTO watchlist(isin, label) VALUES (?,?)", (isin, label))
