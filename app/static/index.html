@@ -19,6 +19,9 @@
     th { background: #f5f5f5; }
     code { background: #f3f3f3; padding: 2px 4px; border-radius: 4px; }
     .muted { color: #666; }
+    .metrics { display:flex; gap:16px; flex-wrap: wrap; margin-top: 8px; }
+    .pill { background:#f6f6f6; border:1px solid #eee; border-radius:999px; padding:6px 10px; }
+    .flash { background: #fff6d6; transition: background 1.2s ease; }
   </style>
 </head>
 <body>
@@ -35,6 +38,11 @@
 
   <h2>Letztes Update</h2>
   <div class="muted">Tipp: die spannendsten Felder sind <code>bid</code>, <code>ask</code>, <code>quotetime</code>, <code>last</code>.</div>
+  <div class="metrics muted">
+    <div class="pill">Updates: <strong id="cnt">0</strong></div>
+    <div class="pill">Letztes Update: <strong id="last">—</strong></div>
+    <div class="pill">ISIN: <strong id="isinLabel">—</strong></div>
+  </div>
 
   <table>
     <thead>
@@ -55,25 +63,59 @@
     const rawEl = document.getElementById("raw");
     const isinEl = document.getElementById("isin");
     const btn = document.getElementById("btn");
+    const cntEl = document.getElementById("cnt");
+    const lastEl = document.getElementById("last");
+    const isinLabelEl = document.getElementById("isinLabel");
 
     function setStatus(level, message) {
       statusEl.className = level;
       statusEl.textContent = message;
     }
 
-    function renderFields(obj) {
-      tbody.innerHTML = "";
-      const keys = Object.keys(obj);
+    // Inkrementelles Rendern + Highlight bei Änderungen
+    const rowsByKey = new Map(); // key -> { tr, tdV }
+    let lastValues = {}; // key -> stringified value
+    let updateCount = 0;
+
+    function fmt(v) {
+      return (v === null || v === undefined) ? "" : String(v);
+    }
+
+    function flashCell(el) {
+      el.classList.add("flash");
+      // Reflow nicht nötig; kurzer Timeout reicht für das Zurückblenden.
+      setTimeout(() => el.classList.remove("flash"), 50);
+    }
+
+    function updateFields(obj) {
+      const keys = Object.keys(obj || {});
       keys.sort((a,b) => a.localeCompare(b));
+
+      // Ensure rows exist (sorted insert)
       for (const k of keys) {
-        const tr = document.createElement("tr");
-        const tdK = document.createElement("td");
-        const tdV = document.createElement("td");
-        tdK.textContent = k;
-        tdV.textContent = (obj[k] === null || obj[k] === undefined) ? "" : String(obj[k]);
-        tr.appendChild(tdK);
-        tr.appendChild(tdV);
-        tbody.appendChild(tr);
+        if (!rowsByKey.has(k)) {
+          const tr = document.createElement("tr");
+          const tdK = document.createElement("td");
+          const tdV = document.createElement("td");
+          tdK.textContent = k;
+          tdV.textContent = "";
+          tr.appendChild(tdK);
+          tr.appendChild(tdV);
+          tbody.appendChild(tr);
+          rowsByKey.set(k, { tr, tdV });
+        }
+      }
+
+      // Update changed values
+      for (const k of keys) {
+        const { tdV } = rowsByKey.get(k);
+        const newVal = fmt(obj[k]);
+        const oldVal = (k in lastValues) ? lastValues[k] : undefined;
+        if (newVal !== oldVal) {
+          tdV.textContent = newVal;
+          flashCell(tdV);
+          lastValues[k] = newVal;
+        }
       }
     }
 
@@ -95,8 +137,12 @@
 
       if (msg.type === "quote") {
         // parsed enthält floats wo möglich
-        renderFields(msg.parsed || {});
+        updateFields(msg.parsed || {});
         rawEl.textContent = JSON.stringify(msg, null, 2);
+        updateCount += 1;
+        cntEl.textContent = String(updateCount);
+        lastEl.textContent = new Date().toLocaleTimeString();
+        isinLabelEl.textContent = (msg.isin || msg.parsed?.symbol || "").toString() || "—";
       }
     };
 
