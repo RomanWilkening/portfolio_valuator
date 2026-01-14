@@ -327,9 +327,30 @@ class LightstreamerSession:
 
         bid = _try_float(decoded.get("bid"))
         ask = _try_float(decoded.get("ask"))
+        reference = _try_float(decoded.get("reference"))
+        last = _try_float(decoded.get("last"))
         qt = decoded.get("quotetime")
-        if bid is None and ask is None:
+        if bid is None and ask is None and reference is None and last is None:
             return None
+
+        # Watchlist-Preis: bei Index-/Underlying-Items ist meist reference relevant (bid/ask/last können 0/# sein)
+        def pick_watch_price() -> tuple[Optional[float], Optional[str]]:
+            candidates: List[tuple[str, Optional[float]]] = [
+                ("reference", reference),
+                ("last", last),
+                ("bid", bid),
+                ("ask", ask),
+            ]
+            # Prefer non-zero values first (0.0000 ist bei einigen Items nur Platzhalter)
+            for name, val in candidates:
+                if val is not None and val != 0.0:
+                    return val, name
+            for name, val in candidates:
+                if val is not None:
+                    return val, name
+            return None, None
+
+        watch_price, watch_field = pick_watch_price()
 
         # Für Portfolio-Updates ist key typischerweise ISIN. Für Indizes (X...) bleibt key die Item-ID.
         return {
@@ -339,6 +360,10 @@ class LightstreamerSession:
             "symbol": symbol,
             "bid": bid,
             "ask": ask,
+            "reference": reference,
+            "last": last,
+            "watch_price": watch_price,
+            "watch_field": watch_field,
             "quotetime": qt,
         }
 
@@ -384,18 +409,22 @@ def load_watchlist(conn) -> List[Dict[str, Any]]:
     return [dict(r) for r in cur.fetchall()]
 
 
-def compute_watchlist_from_asks(asks: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
+def compute_watchlist_from_prices(
+    prices: Dict[str, Optional[float]],
+    fields: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     items = load_watchlist(_conn)
     out: List[Dict[str, Any]] = []
     for it in items:
-        isin = it["isin"]
+        key = it["isin"]
         out.append(
             {
                 "id": it["id"],
                 "label": it.get("label"),
-                "isin": isin,
-                "key": isin,
-                "ask": asks.get(isin),
+                "isin": key,
+                "key": key,
+                "price": prices.get(key),
+                "field": (fields or {}).get(key),
             }
         )
     return out
@@ -410,7 +439,9 @@ class StreamManager:
 
         # Cache: letzte Quotes je Key (ISIN oder X...)
         self.bids: Dict[str, float] = {}
-        self.asks: Dict[str, float] = {}
+        # Watchlist-Kurse (können reference/last/bid/ask sein)
+        self.watch_prices: Dict[str, float] = {}
+        self.watch_fields: Dict[str, str] = {}
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -428,20 +459,20 @@ class StreamManager:
 
         # Initial snapshot (valuations + watchlist based on cached bids)
         bids = self._bids_as_optional()
-        asks = self._asks_as_optional()
+        watch_prices = self._watch_prices_as_optional()
         await ws.send_json(
             {
                 "type": "snapshot",
                 "valuations": compute_all_valuations_from_bids(bids),
-                "watchlist": compute_watchlist_from_asks(asks),
+                "watchlist": compute_watchlist_from_prices(watch_prices, self.watch_fields),
             }
         )
 
     def _bids_as_optional(self) -> Dict[str, Optional[float]]:
         return {k: float(v) for k, v in self.bids.items()}
 
-    def _asks_as_optional(self) -> Dict[str, Optional[float]]:
-        return {k: float(v) for k, v in self.asks.items()}
+    def _watch_prices_as_optional(self) -> Dict[str, Optional[float]]:
+        return {k: float(v) for k, v in self.watch_prices.items()}
 
     async def remove_client(self, ws: WebSocket) -> None:
         self.clients.discard(ws)
@@ -537,8 +568,9 @@ class StreamManager:
                         if key:
                             if evt.get("bid") is not None:
                                 self.bids[key] = float(evt["bid"])
-                            if evt.get("ask") is not None:
-                                self.asks[key] = float(evt["ask"])
+                            if evt.get("watch_price") is not None and evt.get("watch_field"):
+                                self.watch_prices[key] = float(evt["watch_price"])
+                                self.watch_fields[key] = str(evt["watch_field"])
                         await self.broadcast(evt)
 
                 try:
@@ -548,12 +580,12 @@ class StreamManager:
 
                 # On restart, also push a fresh snapshot to align UI state.
                 bids = self._bids_as_optional()
-                asks = self._asks_as_optional()
+                watch_prices = self._watch_prices_as_optional()
                 await self.broadcast(
                     {
                         "type": "snapshot",
                         "valuations": compute_all_valuations_from_bids(bids),
-                        "watchlist": compute_watchlist_from_asks(asks),
+                        "watchlist": compute_watchlist_from_prices(watch_prices, self.watch_fields),
                     }
                 )
 
