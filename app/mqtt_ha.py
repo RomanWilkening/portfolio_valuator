@@ -292,7 +292,8 @@ class HomeAssistantMqttPublisher:
             currency = (w.get("currency") or "EUR").strip().upper()
             price = w.get("price")
             field = w.get("field")
-            name = f"{wid} Kurs" + (f" ({label})" if label else f" ({key})")
+            # Währung im Sensor-Titel, damit es in HA eindeutig ist
+            name = f"{wid} Kurs {currency}" + (f" ({label})" if label else f" ({key})")
             add_sensor(
                 f"watchlist_{wid}_kurs",
                 name,
