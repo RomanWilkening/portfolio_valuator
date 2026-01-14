@@ -58,7 +58,7 @@
         <tr>
           <th>Label</th>
           <th>ISIN</th>
-          <th class="right">Ask</th>
+          <th class="right">Kurs</th>
           <th></th>
         </tr>
       </thead>
@@ -117,7 +117,8 @@
       portfolios: new Map(), // pid -> { positions: Map(isin -> posData), totalsEl: {...}, rowsByIsin: Map(isin -> {bidEl,mvEl,pnlEl,pnlPctEl}) }
       isinsToPortfolios: new Map(), // isin -> Set(pid)
       bids: new Map(), // isin -> bid (number)
-      asks: new Map(), // key -> ask (number)
+      watchPrices: new Map(), // key -> price (number)
+      watchFields: new Map(), // key -> which field (reference/last/bid/ask)
       watch: {
         byId: new Map(), // id -> {isin,label}
         rowById: new Map(), // id -> {bidEl}
@@ -137,6 +138,8 @@
         const label = it.label ? String(it.label) : "";
         state.watch.byId.set(id, { isin, label });
         state.watch.idByIsin.set(isin, id);
+        if (it.price !== null && it.price !== undefined) state.watchPrices.set(isin, Number(it.price));
+        if (it.field) state.watchFields.set(isin, String(it.field));
 
         const tr = document.createElement("tr");
         const tdLabel = document.createElement("td");
@@ -148,8 +151,9 @@
         tdLabel.textContent = label || "—";
         tdIsin.textContent = isin;
 
-        const ask = state.asks.get(isin);
-        tdBid.textContent = (ask === undefined) ? "—" : fmtNum(ask);
+        const px = state.watchPrices.get(isin);
+        const f = state.watchFields.get(isin);
+        tdBid.textContent = (px === undefined) ? "—" : (fmtNum(px) + (f ? ` (${f})` : ""));
 
         const btn = document.createElement("button");
         btn.textContent = "Entfernen";
@@ -300,11 +304,12 @@
       pf.totalsEl.at.textContent = new Date().toISOString();
     }
 
-    function applyQuoteUpdate(key, bid, ask, quotetime) {
+    function applyQuoteUpdate(key, bid, watchPrice, watchField, quotetime) {
       if (!key) return;
       const isin = String(key);
       if (bid !== null && bid !== undefined) state.bids.set(isin, Number(bid));
-      if (ask !== null && ask !== undefined) state.asks.set(isin, Number(ask));
+      if (watchPrice !== null && watchPrice !== undefined) state.watchPrices.set(isin, Number(watchPrice));
+      if (watchField) state.watchFields.set(isin, String(watchField));
       lastQuoteAtEl.textContent = (quotetime && String(quotetime).trim()) ? String(quotetime) : new Date().toLocaleTimeString();
 
       // Watchlist update
@@ -312,8 +317,9 @@
       if (wid !== undefined) {
         const row = state.watch.rowById.get(wid);
         if (row) {
-          const a = state.asks.get(isin);
-          row.bidEl.textContent = (a === undefined) ? "—" : fmtNum(a);
+          const px = state.watchPrices.get(isin);
+          const f = state.watchFields.get(isin);
+          row.bidEl.textContent = (px === undefined) ? "—" : (fmtNum(px) + (f ? ` (${f})` : ""));
         }
       }
 
@@ -379,7 +385,7 @@
         }
 
         if (msg.type === "quote") {
-          applyQuoteUpdate(msg.key || msg.isin, msg.bid, msg.ask, msg.quotetime);
+          applyQuoteUpdate(msg.key || msg.isin, msg.bid, msg.watch_price, msg.watch_field, msg.quotetime);
         }
       };
     }
