@@ -35,79 +35,32 @@
   <div class="muted">MVP: Portfolios in SQLite speichern, Bewertung über <code>bid</code> (BNP Push / Lightstreamer).</div>
   <div id="status" class="info">Lade…</div>
 
-  <div class="grid2">
-    <div class="card">
-      <h2>Portfolios</h2>
-      <div class="row">
-        <select id="portfolioSelect" style="min-width: 320px;"></select>
-        <button id="reloadBtn">Neu laden</button>
-      </div>
-      <div class="row" style="margin-top: 10px;">
-        <input id="newPortfolioName" placeholder="Neues Portfolio (Name)" style="min-width: 320px;" />
-        <button id="createPortfolioBtn">Anlegen</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Bewertung</h2>
-      <div class="row">
-        <button id="valueBtn">Portfolio bewerten (Bid)</button>
-        <span class="pill muted">Letzte Bewertung: <strong id="valuedAt">—</strong></span>
-      </div>
-      <div class="row" style="margin-top: 10px;">
-        <span class="pill">Market Value: <strong id="totalMv">—</strong></span>
-        <span class="pill">Cost Basis: <strong id="totalCb">—</strong></span>
-        <span class="pill">PnL: <strong id="totalPnl">—</strong></span>
-      </div>
-    </div>
-  </div>
-
-  <table>
-    <thead>
-      <tr>
-        <th>ISIN</th>
-        <th class="right">Quantity</th>
-        <th class="right">Entry</th>
-        <th class="right">Bid</th>
-        <th class="right">Market Value</th>
-        <th class="right">Cost Basis</th>
-        <th class="right">PnL</th>
-        <th class="right">PnL %</th>
-      </tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
-
   <div class="card">
-    <h2>Position hinzufügen / ersetzen</h2>
-    <div class="muted">Hinweis: gleiche ISIN wird im Portfolio ersetzt. Menge = Stückzahl.</div>
-    <div class="row" style="margin-top: 10px;">
-      <input id="isin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
-      <input id="qty" type="number" step="any" min="0" placeholder="Quantity" />
-      <input id="entry" type="number" step="any" min="0" placeholder="Entry Price" />
-      <button id="addPosBtn">Speichern</button>
+    <h2>Übersicht</h2>
+    <div class="row">
+      <span class="pill muted">Auto-Bewertung: <strong id="autoEvery">—</strong></span>
+      <span class="pill muted">Letzte Aktualisierung: <strong id="lastRefresh">—</strong></span>
+      <button id="refreshBtn">Jetzt aktualisieren</button>
     </div>
+    <div class="row" style="margin-top: 10px;">
+      <input id="newPortfolioName" placeholder="Neues Portfolio (Name)" style="min-width: 320px;" />
+      <button id="createPortfolioBtn">Portfolio anlegen</button>
+    </div>
+    <div class="muted" style="margin-top: 8px;">Alle Portfolios werden kontinuierlich bewertet (Bid). Änderungen an Positionen werden beim nächsten Refresh sichtbar.</div>
   </div>
+
+  <div id="portfolios"></div>
 
   <script>
     const statusEl = document.getElementById("status");
-    const tbody = document.getElementById("tbody");
+    const portfoliosEl = document.getElementById("portfolios");
 
-    const portfolioSelect = document.getElementById("portfolioSelect");
-    const reloadBtn = document.getElementById("reloadBtn");
+    const autoEveryEl = document.getElementById("autoEvery");
+    const lastRefreshEl = document.getElementById("lastRefresh");
+    const refreshBtn = document.getElementById("refreshBtn");
+
     const newPortfolioName = document.getElementById("newPortfolioName");
     const createPortfolioBtn = document.getElementById("createPortfolioBtn");
-
-    const valueBtn = document.getElementById("valueBtn");
-    const valuedAtEl = document.getElementById("valuedAt");
-    const totalMvEl = document.getElementById("totalMv");
-    const totalCbEl = document.getElementById("totalCb");
-    const totalPnlEl = document.getElementById("totalPnl");
-
-    const isinEl = document.getElementById("isin");
-    const qtyEl = document.getElementById("qty");
-    const entryEl = document.getElementById("entry");
-    const addPosBtn = document.getElementById("addPosBtn");
 
     function setStatus(level, message) {
       statusEl.className = level;
@@ -142,83 +95,114 @@
       return await res.text();
     }
 
-    let currentPortfolio = null; // {id,name}
-    let currentPositions = []; // [{id,isin,quantity,entry_price}]
+    function renderAll(valuations) {
+      portfoliosEl.innerHTML = "";
 
-    function renderPositions(valuationByIsin=null) {
-      tbody.innerHTML = "";
-      for (const p of currentPositions) {
-        const v = valuationByIsin ? valuationByIsin[p.isin] : null;
-        const tr = document.createElement("tr");
-
-        const cells = [
-          p.isin,
-          fmtNum(p.quantity, 6),
-          fmtNum(p.entry_price, 6),
-          v ? fmtNum(v.bid, 6) : "—",
-          v ? fmtNum(v.market_value, 6) : "—",
-          v ? fmtNum(v.cost_basis, 6) : fmtNum(p.entry_price * p.quantity, 6),
-          v ? fmtNum(v.pnl, 6) : "—",
-          v ? fmtPct(v.pnl_pct) : "—",
-        ];
-
-        cells.forEach((val, i) => {
-          const td = document.createElement("td");
-          td.textContent = val;
-          if (i >= 1) td.classList.add("right");
-          if (i === 6 || i === 7) {
-            const c = clsPnL(v ? v.pnl : null);
-            if (c) td.classList.add(c);
-          }
-          tr.appendChild(td);
-        });
-
-        tbody.appendChild(tr);
-      }
-    }
-
-    async function loadPortfolios(selectId=null) {
-      setStatus("info", "Lade Portfolios…");
-      const list = await api("/api/portfolios");
-
-      portfolioSelect.innerHTML = "";
-      if (!list.length) {
-        const opt = document.createElement("option");
-        opt.value = "";
-        opt.textContent = "— kein Portfolio —";
-        portfolioSelect.appendChild(opt);
-        currentPortfolio = null;
-        currentPositions = [];
-        renderPositions();
-        setStatus("warn", "Noch kein Portfolio vorhanden. Lege eins an.");
+      if (!valuations || !valuations.length) {
+        const empty = document.createElement("div");
+        empty.className = "card";
+        empty.innerHTML = "<h2>Keine Portfolios</h2><div class='muted'>Lege oben ein Portfolio an.</div>";
+        portfoliosEl.appendChild(empty);
         return;
       }
 
-      for (const p of list) {
-        const opt = document.createElement("option");
-        opt.value = String(p.id);
-        opt.textContent = `${p.name} (#${p.id}, ${p.positions_count} Pos.)`;
-        portfolioSelect.appendChild(opt);
+      for (const v of valuations) {
+        const pf = v.portfolio;
+        const positions = v.positions || [];
+
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const header = document.createElement("div");
+        header.className = "row";
+        header.innerHTML = `
+          <h2 style="margin:0; flex:1 1 auto;">${pf.name} <span class="muted">(#${pf.id})</span></h2>
+          <span class="pill">Market Value: <strong>${fmtNum(v.totals?.market_value, 6)}</strong></span>
+          <span class="pill">Cost Basis: <strong>${fmtNum(v.totals?.cost_basis, 6)}</strong></span>
+          <span class="pill">PnL: <strong class="${clsPnL(v.totals?.pnl)}">${fmtNum(v.totals?.pnl, 6)}</strong></span>
+          <span class="pill muted">valued_at: <strong>${v.valued_at || "—"}</strong></span>
+        `;
+        card.appendChild(header);
+
+        const table = document.createElement("table");
+        table.innerHTML = `
+          <thead>
+            <tr>
+              <th>ISIN</th>
+              <th class="right">Quantity</th>
+              <th class="right">Entry</th>
+              <th class="right">Bid</th>
+              <th class="right">Market Value</th>
+              <th class="right">Cost Basis</th>
+              <th class="right">PnL</th>
+              <th class="right">PnL %</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        `;
+
+        const tb = table.querySelector("tbody");
+        for (const p of positions) {
+          const tr = document.createElement("tr");
+          const cells = [
+            p.isin,
+            fmtNum(p.quantity, 6),
+            fmtNum(p.entry_price, 6),
+            (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid, 6),
+            (p.market_value === null || p.market_value === undefined) ? "—" : fmtNum(p.market_value, 6),
+            fmtNum(p.cost_basis, 6),
+            (p.pnl === null || p.pnl === undefined) ? "—" : fmtNum(p.pnl, 6),
+            (p.pnl_pct === null || p.pnl_pct === undefined) ? "—" : fmtPct(p.pnl_pct),
+          ];
+
+          cells.forEach((val, i) => {
+            const td = document.createElement("td");
+            td.textContent = val;
+            if (i >= 1) td.classList.add("right");
+            if (i === 6 || i === 7) {
+              const c = clsPnL(p.pnl);
+              if (c) td.classList.add(c);
+            }
+            tr.appendChild(td);
+          });
+          tb.appendChild(tr);
+        }
+        card.appendChild(table);
+
+        const form = document.createElement("div");
+        form.innerHTML = `
+          <div class="muted" style="margin-top: 10px;">Position hinzufügen / ersetzen (gleiche ISIN wird ersetzt)</div>
+          <div class="row" style="margin-top: 8px;">
+            <input data-is="isin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
+            <input data-is="qty" type="number" step="any" min="0" placeholder="Quantity" />
+            <input data-is="entry" type="number" step="any" min="0" placeholder="Entry Price" />
+            <button data-is="save">Speichern</button>
+          </div>
+        `;
+
+        form.querySelector('[data-is="save"]').onclick = async () => {
+          const isin = (form.querySelector('[data-is="isin"]').value || "").trim().toUpperCase();
+          const qty = Number(form.querySelector('[data-is="qty"]').value);
+          const entry = Number(form.querySelector('[data-is="entry"]').value);
+          if (!isin || !isFinite(qty) || qty <= 0 || !isFinite(entry) || entry <= 0) {
+            setStatus("error", "Bitte ISIN, Quantity (>0) und Entry Price (>0) angeben.");
+            return;
+          }
+
+          const next = (positions || [])
+            .filter(x => x.isin !== isin)
+            .map(x => ({ isin: x.isin, quantity: x.quantity, entry_price: x.entry_price }));
+          next.push({ isin, quantity: qty, entry_price: entry });
+
+          setStatus("info", `Speichere Positionen für Portfolio #${pf.id}…`);
+          await api(`/api/portfolios/${pf.id}/positions`, { method: "PUT", body: JSON.stringify(next) });
+          await refreshAll();
+          setStatus("success", `Position gespeichert (Portfolio #${pf.id}).`);
+        };
+
+        card.appendChild(form);
+        portfoliosEl.appendChild(card);
       }
-
-      const chosen = selectId ? String(selectId) : (portfolioSelect.value || String(list[0].id));
-      portfolioSelect.value = chosen;
-      await loadPortfolio(chosen);
-    }
-
-    async function loadPortfolio(id) {
-      if (!id) return;
-      setStatus("info", "Lade Portfolio…");
-      const data = await api(`/api/portfolios/${id}`);
-      currentPortfolio = data.portfolio;
-      currentPositions = data.positions || [];
-      valuedAtEl.textContent = "—";
-      totalMvEl.textContent = "—";
-      totalCbEl.textContent = "—";
-      totalPnlEl.textContent = "—";
-      totalPnlEl.className = "";
-      renderPositions();
-      setStatus("success", `Portfolio geladen: ${currentPortfolio.name} (#${currentPortfolio.id})`);
     }
 
     async function createPortfolio() {
@@ -227,61 +211,28 @@
       setStatus("info", "Lege Portfolio an…");
       const p = await api("/api/portfolios", { method: "POST", body: JSON.stringify({ name }) });
       newPortfolioName.value = "";
-      await loadPortfolios(p.id);
-      setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id})`);
+      await refreshAll();
+      setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id}).`);
     }
 
-    async function savePosition() {
-      if (!currentPortfolio) return;
-      const isin = (isinEl.value || "").trim().toUpperCase();
-      const qty = Number(qtyEl.value);
-      const entry = Number(entryEl.value);
-
-      if (!isin || !isFinite(qty) || qty <= 0 || !isFinite(entry) || entry <= 0) {
-        setStatus("error", "Bitte ISIN, Quantity (>0) und Entry Price (>0) angeben.");
-        return;
-      }
-
-      const next = currentPositions
-        .filter(p => p.isin !== isin)
-        .map(p => ({ isin: p.isin, quantity: p.quantity, entry_price: p.entry_price }));
-      next.push({ isin, quantity: qty, entry_price: entry });
-
-      setStatus("info", "Speichere Positionen…");
-      const data = await api(`/api/portfolios/${currentPortfolio.id}/positions`, {
-        method: "PUT",
-        body: JSON.stringify(next),
-      });
-      currentPositions = data.positions || [];
-      renderPositions();
-      setStatus("success", "Position gespeichert.");
-    }
-
-    async function valuePortfolio() {
-      if (!currentPortfolio) return;
-      setStatus("info", "Bewerte Portfolio (Bid)…");
-      const res = await api(`/api/portfolios/${currentPortfolio.id}/value`, { method: "POST" });
-
-      const byIsin = {};
-      for (const p of (res.positions || [])) byIsin[p.isin] = p;
-
-      valuedAtEl.textContent = res.valued_at || "—";
-      totalMvEl.textContent = fmtNum(res.totals?.market_value, 6);
-      totalCbEl.textContent = fmtNum(res.totals?.cost_basis, 6);
-      totalPnlEl.textContent = fmtNum(res.totals?.pnl, 6);
-      totalPnlEl.className = clsPnL(res.totals?.pnl);
-
-      renderPositions(byIsin);
-      setStatus("success", "Bewertung abgeschlossen.");
-    }
-
-    reloadBtn.onclick = () => loadPortfolios(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
     createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
-    portfolioSelect.onchange = () => loadPortfolio(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
-    addPosBtn.onclick = () => savePosition().catch(e => setStatus("error", String(e.message || e)));
-    valueBtn.onclick = () => valuePortfolio().catch(e => setStatus("error", String(e.message || e)));
 
-    loadPortfolios().catch(e => setStatus("error", String(e.message || e)));
+    const AUTO_REFRESH_MS = 5000;
+    autoEveryEl.textContent = `${AUTO_REFRESH_MS/1000}s`;
+
+    async function refreshAll() {
+      const vals = await api("/api/portfolios/valuations");
+      renderAll(vals);
+      lastRefreshEl.textContent = new Date().toLocaleTimeString();
+    }
+
+    refreshBtn.onclick = () => refreshAll().catch(e => setStatus("error", String(e.message || e)));
+
+    // Start + kontinuierlich aktualisieren
+    refreshAll()
+      .then(() => setStatus("success", "Daten geladen. Auto-Bewertung läuft…"))
+      .catch(e => setStatus("error", String(e.message || e)));
+    setInterval(() => refreshAll().catch(() => {}), AUTO_REFRESH_MS);
   </script>
 </body>
 </html>

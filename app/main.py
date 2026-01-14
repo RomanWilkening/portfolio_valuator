@@ -321,6 +321,63 @@ async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Opti
         await sess.close()
 
 
+def compute_valuation(
+    portfolio: Dict[str, Any],
+    positions: List[Dict[str, Any]],
+    bids: Dict[str, Optional[float]],
+    valued_at: str,
+    timeout_s: float,
+) -> Dict[str, Any]:
+    out_positions: List[Dict[str, Any]] = []
+    total_mv = 0.0
+    total_cb = 0.0
+
+    for p in positions:
+        isin = p["isin"]
+        qty = float(p["quantity"])
+        entry = float(p["entry_price"])
+        bid = bids.get(isin)
+
+        cost_basis = entry * qty
+        market_value = (bid * qty) if bid is not None else None
+        pnl = (market_value - cost_basis) if market_value is not None else None
+        pnl_pct = (pnl / cost_basis) if (pnl is not None and cost_basis != 0) else None
+
+        if market_value is not None:
+            total_mv += market_value
+        total_cb += cost_basis
+
+        out_positions.append(
+            {
+                "id": p.get("id"),
+                "isin": isin,
+                "quantity": qty,
+                "entry_price": entry,
+                "bid": bid,
+                "market_value": market_value,
+                "cost_basis": cost_basis,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+            }
+        )
+
+    total_pnl = total_mv - total_cb
+    total_pnl_pct = (total_pnl / total_cb) if total_cb else None
+
+    return {
+        "portfolio": dict(portfolio),
+        "valued_at": valued_at,
+        "positions": out_positions,
+        "totals": {
+            "market_value": total_mv,
+            "cost_basis": total_cb,
+            "pnl": total_pnl,
+            "pnl_pct": total_pnl_pct,
+        },
+        "meta": {"quote_timeout_s": timeout_s},
+    }
+
+
 # ----------------- API Models -----------------
 
 
@@ -435,58 +492,62 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
         (portfolio_id,),
     )
     positions = [dict(r) for r in cur2.fetchall()]
+    valued_at = now_iso()
     if not positions:
-        return {"portfolio": dict(portfolio), "valued_at": now_iso(), "positions": [], "totals": {"market_value": 0.0, "cost_basis": 0.0, "pnl": 0.0, "pnl_pct": None}}
+        return compute_valuation(dict(portfolio), [], {}, valued_at=valued_at, timeout_s=0.0)
 
     isins = [p["isin"] for p in positions]
     timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
     bids = await fetch_bids(isins, timeout_s=timeout_s)
+    return compute_valuation(dict(portfolio), positions, bids, valued_at=valued_at, timeout_s=timeout_s)
 
-    out_positions: List[Dict[str, Any]] = []
-    total_mv = 0.0
-    total_cb = 0.0
 
-    for p in positions:
+@app.get("/api/portfolios/valuations")
+async def value_all_portfolios() -> List[Dict[str, Any]]:
+    """
+    Bewertet alle Portfolios in einem Request.
+    Wichtig: Wir holen alle Bid-Quotes gesammelt in *einer* Lightstreamer-Session,
+    um die Bewertung kontinuierlich (Polling) effizient zu halten.
+    """
+    cur = _conn.execute("SELECT id, name FROM portfolios ORDER BY id DESC")
+    portfolios = [dict(r) for r in cur.fetchall()]
+    if not portfolios:
+        return []
+
+    cur2 = _conn.execute(
+        """
+        SELECT id, portfolio_id, isin, quantity, entry_price
+        FROM positions
+        ORDER BY portfolio_id DESC, id ASC
+        """
+    )
+    positions_all = [dict(r) for r in cur2.fetchall()]
+
+    by_portfolio: Dict[int, List[Dict[str, Any]]] = {}
+    all_isins: List[str] = []
+    seen: set[str] = set()
+    for p in positions_all:
+        pid = int(p["portfolio_id"])
+        by_portfolio.setdefault(pid, []).append(p)
         isin = p["isin"]
-        qty = float(p["quantity"])
-        entry = float(p["entry_price"])
-        bid = bids.get(isin)
+        if isin not in seen:
+            seen.add(isin)
+            all_isins.append(isin)
 
-        cost_basis = entry * qty
-        market_value = (bid * qty) if bid is not None else None
-        pnl = (market_value - cost_basis) if market_value is not None else None
-        pnl_pct = (pnl / cost_basis) if (pnl is not None and cost_basis != 0) else None
+    valued_at = now_iso()
+    timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
+    bids = await fetch_bids(all_isins, timeout_s=timeout_s) if all_isins else {}
 
-        if market_value is not None:
-            total_mv += market_value
-        total_cb += cost_basis
-
-        out_positions.append(
-            {
-                "id": p["id"],
-                "isin": isin,
-                "quantity": qty,
-                "entry_price": entry,
-                "bid": bid,
-                "market_value": market_value,
-                "cost_basis": cost_basis,
-                "pnl": pnl,
-                "pnl_pct": pnl_pct,
-            }
+    out: List[Dict[str, Any]] = []
+    for pf in portfolios:
+        pid = int(pf["id"])
+        out.append(
+            compute_valuation(
+                pf,
+                by_portfolio.get(pid, []),
+                bids,
+                valued_at=valued_at,
+                timeout_s=timeout_s,
+            )
         )
-
-    total_pnl = (total_mv - total_cb) if (total_cb != 0 and total_mv is not None) else (total_mv - total_cb)
-    total_pnl_pct = (total_pnl / total_cb) if total_cb else None
-
-    return {
-        "portfolio": dict(portfolio),
-        "valued_at": now_iso(),
-        "positions": out_positions,
-        "totals": {
-            "market_value": total_mv,
-            "cost_basis": total_cb,
-            "pnl": total_pnl,
-            "pnl_pct": total_pnl_pct,
-        },
-        "meta": {"quote_timeout_s": timeout_s},
-    }
+    return out
