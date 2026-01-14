@@ -48,6 +48,11 @@ def init_db(conn: sqlite3.Connection) -> None:
           isin TEXT NOT NULL UNIQUE,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
         """
     )
     conn.commit()

@@ -54,7 +54,7 @@ Die Defaults sind auf die bisherige BNP-Lightstreamer-Konfiguration ausgelegt. B
 
 ### MQTT → Home Assistant (Auto-Detect)
 
-Wenn `MQTT_HOST` gesetzt ist (oder `MQTT_ENABLED=true`), publiziert die App eine **einzelne** Home-Assistant MQTT-Discovery Sensor-Entität.
+Wenn `MQTT_HOST` gesetzt ist, kannst du MQTT im Webinterface (Portfolio-Pflege) **aktivieren**. Default ist **aus**.
 
 - **Discovery Topic**: `homeassistant/sensor/<MQTT_NODE_ID>/<MQTT_OBJECT_ID>/config`
 - **State**: `total_market_value` (numerisch, kurz)

@@ -20,7 +20,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class MqttSettings:
-    enabled: bool
     host: str
     port: int
     username: Optional[str]
@@ -55,14 +54,11 @@ class MqttSettings:
 
 def load_mqtt_settings() -> MqttSettings:
     host = (os.getenv("MQTT_HOST") or "").strip()
-    enabled = _env_bool("MQTT_ENABLED", default=bool(host))
-
     node_id = (os.getenv("MQTT_NODE_ID") or "").strip() or "portfolio_valuator"
     object_id = (os.getenv("MQTT_OBJECT_ID") or "").strip() or "portfolio"
     base_topic = (os.getenv("MQTT_BASE_TOPIC") or "").strip() or f"portfolio_valuator/{node_id}"
 
     return MqttSettings(
-        enabled=enabled,
         host=host,
         port=int(os.getenv("MQTT_PORT", "1883")),
         username=(os.getenv("MQTT_USERNAME") or "").strip() or None,
@@ -92,10 +88,8 @@ class HomeAssistantMqttPublisher:
         self._last_publish_ts = 0.0
 
     def connect(self) -> None:
-        if not self.s.enabled:
-            return
         if not self.s.host:
-            raise RuntimeError("MQTT_HOST ist leer, aber MQTT_ENABLED=true.")
+            raise RuntimeError("MQTT_HOST ist leer.")
 
         client = mqtt.Client(client_id=self.s.client_id, protocol=mqtt.MQTTv311)
         if self.s.username:

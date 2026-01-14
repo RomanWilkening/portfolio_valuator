@@ -15,6 +15,7 @@ from websockets.exceptions import ConnectionClosed
 
 from app.db import connect_db, init_db
 from app.mqtt_ha import HomeAssistantMqttPublisher, build_entity_payload, load_mqtt_settings
+from app.settings import get_bool, set_bool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("portfolio-valuator")
@@ -609,7 +610,7 @@ def _publish_mqtt_snapshot() -> None:
     Best-effort + debounced inside publisher.
     """
     global _mqtt
-    if not _mqtt:
+    if not _mqtt or not _mqtt_is_enabled():
         return
     bids = stream_manager._bids_as_optional()
     watch_prices = stream_manager._watch_prices_as_optional()
@@ -623,6 +624,35 @@ def _publish_mqtt_snapshot() -> None:
         meta={"source": "stream_cache"},
     )
     _mqtt.publish_now(state_value, attrs)
+
+
+def _mqtt_is_enabled() -> bool:
+    return get_bool(_conn, "mqtt_enabled", default=False)
+
+
+def _set_mqtt_enabled(enabled: bool) -> None:
+    set_bool(_conn, "mqtt_enabled", enabled)
+
+
+def _mqtt_connect_if_enabled() -> None:
+    global _mqtt
+    if not _mqtt_is_enabled():
+        return
+    if _mqtt:
+        return
+    s = load_mqtt_settings()
+    if not s.host:
+        raise RuntimeError("MQTT_HOST ist nicht gesetzt.")
+    _mqtt = HomeAssistantMqttPublisher(s)
+    _mqtt.connect()
+    _publish_mqtt_snapshot()
+
+
+def _mqtt_disconnect() -> None:
+    global _mqtt
+    if _mqtt:
+        _mqtt.close()
+    _mqtt = None
 
 
 async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Optional[float]]:
@@ -782,16 +812,11 @@ init_db(_conn)
 async def _startup() -> None:
     # Stream startet erst, wenn ein Dashboard-Client verbunden ist.
     stream_manager.start()
-    global _mqtt
+    # MQTT default: aus. Nur verbinden, wenn UI-Setting mqtt_enabled=true ist.
     try:
-        s = load_mqtt_settings()
-        if s.enabled:
-            _mqtt = HomeAssistantMqttPublisher(s)
-            _mqtt.connect()
-            # initial publish
-            _publish_mqtt_snapshot()
+        _mqtt_connect_if_enabled()
     except Exception as e:
-        logger.warning("MQTT disabled/unavailable: %s", e)
+        logger.warning("MQTT connect failed: %s", e)
 
 
 @app.on_event("shutdown")
@@ -802,12 +827,7 @@ async def _shutdown() -> None:
             await stream_manager._task
         except Exception:
             pass
-    global _mqtt
-    try:
-        if _mqtt:
-            _mqtt.close()
-    finally:
-        _mqtt = None
+    _mqtt_disconnect()
 
 
 @app.get("/")
@@ -1018,3 +1038,30 @@ async def ws_dashboard(ws: WebSocket):
         pass
     finally:
         await stream_manager.remove_client(ws)
+
+
+@app.get("/api/mqtt")
+async def mqtt_status() -> Dict[str, Any]:
+    s = load_mqtt_settings()
+    enabled = _mqtt_is_enabled()
+    return {
+        "enabled": enabled,
+        "connected": bool(_mqtt),
+        "host": s.host,
+        "port": s.port,
+        "discovery_topic": s.discovery_topic,
+        "state_topic": s.state_topic,
+        "attributes_topic": s.attributes_topic,
+        "availability_topic": s.availability_topic,
+    }
+
+
+@app.put("/api/mqtt/enabled")
+async def mqtt_set_enabled(body: Dict[str, Any]) -> Dict[str, Any]:
+    enabled = bool(body.get("enabled"))
+    _set_mqtt_enabled(enabled)
+    if enabled:
+        _mqtt_connect_if_enabled()
+    else:
+        _mqtt_disconnect()
+    return await mqtt_status()
