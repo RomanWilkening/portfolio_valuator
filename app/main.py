@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -46,6 +47,13 @@ LS_USER_AGENT = os.getenv(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 )
+
+# Reconnect / Stabilität
+LS_RECONNECT_MIN_S = float(os.getenv("LS_RECONNECT_MIN_S", "1.0"))
+LS_RECONNECT_MAX_S = float(os.getenv("LS_RECONNECT_MAX_S", "30.0"))
+# If we don't receive any WS message for this long, consider the stream stuck and reconnect.
+LS_RECV_TIMEOUT_S = float(os.getenv("LS_RECV_TIMEOUT_S", "35.0"))
+LS_STALE_RESTART_S = float(os.getenv("LS_STALE_RESTART_S", "90.0"))
 
 # Für Streaming + Bewertung nutzen wir das „volle“ Schema (wie aus dem Browser beobachtet),
 # damit auch andere Item-Typen (z.B. Indizes) sauber funktionieren.
@@ -496,6 +504,7 @@ class StreamManager:
         Restarts subscription when portfolios/positions change (dirty flag).
         """
         last_items: List[str] = []
+        backoff_s: float = max(0.1, LS_RECONNECT_MIN_S)
 
         while True:
             try:
@@ -545,24 +554,66 @@ class StreamManager:
                 await self.broadcast({"type": "status", "level": "info", "message": f"Starte Stream für {len(items)} Item(s)…"})
 
                 sess = LightstreamerSession()
-                await sess.connect()
-                await sess.subscribe_items(items)
+                try:
+                    await sess.connect()
+                    await sess.subscribe_items(items)
+                except Exception as e:
+                    # Backoff + retry on connect/subscribe errors
+                    wait_s = min(max(LS_RECONNECT_MIN_S, backoff_s), LS_RECONNECT_MAX_S)
+                    jitter = random.uniform(0.0, max(0.1, wait_s * 0.1))
+                    await self.broadcast(
+                        {
+                            "type": "status",
+                            "level": "error",
+                            "message": f"Stream-Verbindung fehlgeschlagen: {e} — Reconnect in {wait_s:.1f}s",
+                        }
+                    )
+                    try:
+                        await sess.close()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(wait_s + jitter)
+                    backoff_s = min(LS_RECONNECT_MAX_S, max(LS_RECONNECT_MIN_S, backoff_s * 2.0))
+                    # force reconnect even if items unchanged
+                    last_items = []
+                    continue
+
+                backoff_s = max(0.1, LS_RECONNECT_MIN_S)
                 await self.broadcast({"type": "status", "level": "success", "message": "Stream verbunden."})
 
                 # Receive loop until dirty flag set -> restart (oder bis wir den Stream nicht mehr brauchen)
+                loop = asyncio.get_running_loop()
+                last_any_msg = loop.time()
                 while not self._dirty.is_set() and (self.clients or _mqtt_is_enabled()):
                     try:
-                        raw = await sess._recv_text()
+                        raw = await asyncio.wait_for(sess._recv_text(), timeout=max(1.0, LS_RECV_TIMEOUT_S))
                     except ConnectionClosed as e:
                         await self.broadcast({"type": "status", "level": "error", "message": f"Stream getrennt: {e.code} {e.reason}"})
                         break
+                    except asyncio.TimeoutError:
+                        # We expect regular PROBE frames; if we don't see anything for a while,
+                        # restart the connection to avoid silently-stuck sessions.
+                        if (loop.time() - last_any_msg) >= max(LS_RECV_TIMEOUT_S, LS_STALE_RESTART_S):
+                            await self.broadcast(
+                                {
+                                    "type": "status",
+                                    "level": "warn",
+                                    "message": f"Stream ohne Daten seit {(loop.time() - last_any_msg):.0f}s — Reconnect…",
+                                }
+                            )
+                            break
+                        continue
 
                     for line in sess._split_lines(raw):
                         if line == "PROBE":
+                            last_any_msg = loop.time()
                             continue
                         if line.startswith("REQERR,") or line.startswith("ERROR,") or line.startswith("CONERR,"):
                             await self.broadcast({"type": "status", "level": "error", "message": f"Lightstreamer: {line}"})
-                            continue
+                            # Errors often indicate a broken session/subscription -> reconnect.
+                            break
+
+                        last_any_msg = loop.time()
 
                         evt = sess.handle_update_line(line, idx_to_key)
                         if not evt:
@@ -578,6 +629,11 @@ class StreamManager:
                                 self.watch_fields[key] = str(evt["watch_field"])
                         await self.broadcast(evt)
                         _publish_mqtt_snapshot()
+                    else:
+                        # no break in for-loop
+                        continue
+                    # break in for-loop: break out of receive loop too
+                    break
 
                 try:
                     await sess.close()
@@ -594,6 +650,14 @@ class StreamManager:
                         "watchlist": compute_watchlist_from_prices(watch_prices, self.watch_fields),
                     }
                 )
+                # If we ended the session without a "dirty" restart request, force reconnect.
+                # (Otherwise we'd sit in the "items == last_items" short-circuit and never restart.)
+                if not self._dirty.is_set() and (self.clients or _mqtt_is_enabled()):
+                    wait_s = min(max(LS_RECONNECT_MIN_S, backoff_s), LS_RECONNECT_MAX_S)
+                    jitter = random.uniform(0.0, max(0.1, wait_s * 0.1))
+                    await asyncio.sleep(wait_s + jitter)
+                    backoff_s = min(LS_RECONNECT_MAX_S, max(LS_RECONNECT_MIN_S, backoff_s * 2.0))
+                    last_items = []
 
             except asyncio.CancelledError:
                 break
