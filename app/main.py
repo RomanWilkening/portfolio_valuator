@@ -415,7 +415,12 @@ init_db(_conn)
 
 @app.get("/")
 async def index():
-    return FileResponse("app/static/index.html")
+    return FileResponse("app/static/dashboard.html")
+
+
+@app.get("/manage")
+async def manage():
+    return FileResponse("app/static/manage.html")
 
 
 @app.get("/api/portfolios")
