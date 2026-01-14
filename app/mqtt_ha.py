@@ -138,7 +138,9 @@ class HomeAssistantMqttPublisher:
         name: str,
         unit: Optional[str] = None,
         device_class: Optional[str] = None,
-        state_class: Optional[str] = "measurement",
+        # Wenn state_class gesetzt ist, zeigt Home Assistant beim Klick oft die Statistik-Ansicht
+        # (5-Minuten-Aggregate). Für „jeden Punkt“ in der More-Info-Ansicht lassen wir state_class weg.
+        state_class: Optional[str] = None,
         extra_attrs: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not self.client:
@@ -223,7 +225,7 @@ class HomeAssistantMqttPublisher:
                     name=name,
                     unit=unit,
                     device_class=device_class,
-                    state_class="measurement",
+                    state_class=None,
                     extra_attrs=attrs,
                 )
             self._publish_state(oid, value, attrs)
