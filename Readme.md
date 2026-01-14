@@ -11,6 +11,22 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Danach im Browser öffnen: `http://localhost:8000/`
 
+### Docker (persistente SQLite)
+
+1. Beispiel-Config kopieren:
+
+```bash
+cp config/app.env.example config/app.env
+```
+
+2. Starten:
+
+```bash
+docker compose up --build
+```
+
+Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data` gemountet).
+
 ### Seiten
 
 - Dashboard (Auto-Bewertung): `http://localhost:8000/`
