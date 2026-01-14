@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BNP Push MVP</title>
+  <title>Portfolio Valuator (BNP)</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 1000px; }
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 1100px; }
     .row { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
-    input { padding: 10px; font-size: 16px; width: 260px; }
+    input, select { padding: 10px; font-size: 16px; }
+    input[type="number"] { width: 160px; }
     button { padding: 10px 14px; font-size: 16px; cursor: pointer; }
     #status { margin: 12px 0; padding: 10px; border-radius: 8px; }
     .info { background: #eef; }
@@ -19,143 +20,265 @@
     th { background: #f5f5f5; }
     code { background: #f3f3f3; padding: 2px 4px; border-radius: 4px; }
     .muted { color: #666; }
-    .metrics { display:flex; gap:16px; flex-wrap: wrap; margin-top: 8px; }
-    .pill { background:#f6f6f6; border:1px solid #eee; border-radius:999px; padding:6px 10px; }
-    .flash { background: #fff6d6; transition: background 1.2s ease; }
+    .card { border: 1px solid #eee; border-radius: 12px; padding: 14px; margin-top: 14px; background: #fff; }
+    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+    .pill { display:inline-block; background:#f6f6f6; border:1px solid #eee; border-radius:999px; padding:6px 10px; }
+    .right { text-align: right; }
+    .pos { color: #0a7a0a; }
+    .neg { color: #b00020; }
   </style>
 </head>
 <body>
-  <h1>BNP Push MVP (Lightstreamer)</h1>
+  <h1>Portfolio Valuator (BNP)</h1>
 
-  <div class="row">
-    <label for="isin"><strong>ISIN</strong></label>
-    <input id="isin" placeholder="z.B. DE000PK6M705" />
-    <button id="btn">Subscribe</button>
-    <span class="muted">zeigt nur Live-Push, kein Speichern</span>
-  </div>
-
+  <div class="muted">MVP: Portfolios in SQLite speichern, Bewertung über <code>bid</code> (BNP Push / Lightstreamer).</div>
   <div id="status" class="info">Lade…</div>
 
-  <h2>Letztes Update</h2>
-  <div class="muted">Tipp: die spannendsten Felder sind <code>bid</code>, <code>ask</code>, <code>quotetime</code>, <code>last</code>.</div>
-  <div class="metrics muted">
-    <div class="pill">Updates: <strong id="cnt">0</strong></div>
-    <div class="pill">Letztes Update: <strong id="last">—</strong></div>
-    <div class="pill">ISIN: <strong id="isinLabel">—</strong></div>
+  <div class="grid2">
+    <div class="card">
+      <h2>Portfolios</h2>
+      <div class="row">
+        <select id="portfolioSelect" style="min-width: 320px;"></select>
+        <button id="reloadBtn">Neu laden</button>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <input id="newPortfolioName" placeholder="Neues Portfolio (Name)" style="min-width: 320px;" />
+        <button id="createPortfolioBtn">Anlegen</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Bewertung</h2>
+      <div class="row">
+        <button id="valueBtn">Portfolio bewerten (Bid)</button>
+        <span class="pill muted">Letzte Bewertung: <strong id="valuedAt">—</strong></span>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <span class="pill">Market Value: <strong id="totalMv">—</strong></span>
+        <span class="pill">Cost Basis: <strong id="totalCb">—</strong></span>
+        <span class="pill">PnL: <strong id="totalPnl">—</strong></span>
+      </div>
+    </div>
   </div>
 
   <table>
     <thead>
       <tr>
-        <th>Feld</th>
-        <th>Wert</th>
+        <th>ISIN</th>
+        <th class="right">Quantity</th>
+        <th class="right">Entry</th>
+        <th class="right">Bid</th>
+        <th class="right">Market Value</th>
+        <th class="right">Cost Basis</th>
+        <th class="right">PnL</th>
+        <th class="right">PnL %</th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
   </table>
 
-  <h2>Raw JSON</h2>
-  <pre id="raw" style="white-space: pre-wrap; background:#fafafa; padding:12px; border:1px solid #eee; border-radius:10px;"></pre>
+  <div class="card">
+    <h2>Position hinzufügen / ersetzen</h2>
+    <div class="muted">Hinweis: gleiche ISIN wird im Portfolio ersetzt. Menge = Stückzahl.</div>
+    <div class="row" style="margin-top: 10px;">
+      <input id="isin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
+      <input id="qty" type="number" step="any" min="0" placeholder="Quantity" />
+      <input id="entry" type="number" step="any" min="0" placeholder="Entry Price" />
+      <button id="addPosBtn">Speichern</button>
+    </div>
+  </div>
 
   <script>
     const statusEl = document.getElementById("status");
     const tbody = document.getElementById("tbody");
-    const rawEl = document.getElementById("raw");
+
+    const portfolioSelect = document.getElementById("portfolioSelect");
+    const reloadBtn = document.getElementById("reloadBtn");
+    const newPortfolioName = document.getElementById("newPortfolioName");
+    const createPortfolioBtn = document.getElementById("createPortfolioBtn");
+
+    const valueBtn = document.getElementById("valueBtn");
+    const valuedAtEl = document.getElementById("valuedAt");
+    const totalMvEl = document.getElementById("totalMv");
+    const totalCbEl = document.getElementById("totalCb");
+    const totalPnlEl = document.getElementById("totalPnl");
+
     const isinEl = document.getElementById("isin");
-    const btn = document.getElementById("btn");
-    const cntEl = document.getElementById("cnt");
-    const lastEl = document.getElementById("last");
-    const isinLabelEl = document.getElementById("isinLabel");
+    const qtyEl = document.getElementById("qty");
+    const entryEl = document.getElementById("entry");
+    const addPosBtn = document.getElementById("addPosBtn");
 
     function setStatus(level, message) {
       statusEl.className = level;
       statusEl.textContent = message;
     }
 
-    // Inkrementelles Rendern + Highlight bei Änderungen
-    const rowsByKey = new Map(); // key -> { tr, tdV }
-    let lastValues = {}; // key -> stringified value
-    let updateCount = 0;
-
-    function fmt(v) {
-      return (v === null || v === undefined) ? "" : String(v);
+    function fmtNum(n, digits=4) {
+      if (n === null || n === undefined) return "—";
+      if (!isFinite(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
     }
 
-    function flashCell(el) {
-      el.classList.add("flash");
-      // Reflow nicht nötig; kurzer Timeout reicht für das Zurückblenden.
-      setTimeout(() => el.classList.remove("flash"), 50);
+    function fmtPct(x) {
+      if (x === null || x === undefined) return "—";
+      const pct = x * 100;
+      return pct.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "%";
     }
 
-    function updateFields(obj) {
-      const keys = Object.keys(obj || {});
-      keys.sort((a,b) => a.localeCompare(b));
+    function clsPnL(x) {
+      if (x === null || x === undefined) return "";
+      return x >= 0 ? "pos" : "neg";
+    }
 
-      // Ensure rows exist (sorted insert)
-      for (const k of keys) {
-        if (!rowsByKey.has(k)) {
-          const tr = document.createElement("tr");
-          const tdK = document.createElement("td");
-          const tdV = document.createElement("td");
-          tdK.textContent = k;
-          tdV.textContent = "";
-          tr.appendChild(tdK);
-          tr.appendChild(tdV);
-          tbody.appendChild(tr);
-          rowsByKey.set(k, { tr, tdV });
-        }
+    async function api(path, options={}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
       }
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) return await res.json();
+      return await res.text();
+    }
 
-      // Update changed values
-      for (const k of keys) {
-        const { tdV } = rowsByKey.get(k);
-        const newVal = fmt(obj[k]);
-        const oldVal = (k in lastValues) ? lastValues[k] : undefined;
-        if (newVal !== oldVal) {
-          tdV.textContent = newVal;
-          flashCell(tdV);
-          lastValues[k] = newVal;
-        }
+    let currentPortfolio = null; // {id,name}
+    let currentPositions = []; // [{id,isin,quantity,entry_price}]
+
+    function renderPositions(valuationByIsin=null) {
+      tbody.innerHTML = "";
+      for (const p of currentPositions) {
+        const v = valuationByIsin ? valuationByIsin[p.isin] : null;
+        const tr = document.createElement("tr");
+
+        const cells = [
+          p.isin,
+          fmtNum(p.quantity, 6),
+          fmtNum(p.entry_price, 6),
+          v ? fmtNum(v.bid, 6) : "—",
+          v ? fmtNum(v.market_value, 6) : "—",
+          v ? fmtNum(v.cost_basis, 6) : fmtNum(p.entry_price * p.quantity, 6),
+          v ? fmtNum(v.pnl, 6) : "—",
+          v ? fmtPct(v.pnl_pct) : "—",
+        ];
+
+        cells.forEach((val, i) => {
+          const td = document.createElement("td");
+          td.textContent = val;
+          if (i >= 1) td.classList.add("right");
+          if (i === 6 || i === 7) td.classList.add(clsPnL(v ? v.pnl : null));
+          tr.appendChild(td);
+        });
+
+        tbody.appendChild(tr);
       }
     }
 
-    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
-    const ws = new WebSocket(wsUrl);
+    async function loadPortfolios(selectId=null) {
+      setStatus("info", "Lade Portfolios…");
+      const list = await api("/api/portfolios");
 
-    ws.onopen = () => setStatus("info", "Verbunden. Bitte ISIN eingeben und Subscribe klicken.");
-    ws.onclose = () => setStatus("error", "WebSocket getrennt.");
-    ws.onerror = () => setStatus("error", "WebSocket Fehler.");
-
-    ws.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-
-      if (msg.type === "status") {
-        setStatus(msg.level || "info", msg.message || "");
+      portfolioSelect.innerHTML = "";
+      if (!list.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "— kein Portfolio —";
+        portfolioSelect.appendChild(opt);
+        currentPortfolio = null;
+        currentPositions = [];
+        renderPositions();
+        setStatus("warn", "Noch kein Portfolio vorhanden. Lege eins an.");
         return;
       }
 
-      if (msg.type === "quote") {
-        // parsed enthält floats wo möglich
-        updateFields(msg.parsed || {});
-        rawEl.textContent = JSON.stringify(msg, null, 2);
-        updateCount += 1;
-        cntEl.textContent = String(updateCount);
-        lastEl.textContent = new Date().toLocaleTimeString();
-        isinLabelEl.textContent = (msg.isin || msg.parsed?.symbol || "").toString() || "—";
+      for (const p of list) {
+        const opt = document.createElement("option");
+        opt.value = String(p.id);
+        opt.textContent = `${p.name} (#${p.id}, ${p.positions_count} Pos.)`;
+        portfolioSelect.appendChild(opt);
       }
-    };
 
-    btn.onclick = () => {
+      const chosen = selectId ? String(selectId) : (portfolioSelect.value || String(list[0].id));
+      portfolioSelect.value = chosen;
+      await loadPortfolio(chosen);
+    }
+
+    async function loadPortfolio(id) {
+      if (!id) return;
+      setStatus("info", "Lade Portfolio…");
+      const data = await api(`/api/portfolios/${id}`);
+      currentPortfolio = data.portfolio;
+      currentPositions = data.positions || [];
+      valuedAtEl.textContent = "—";
+      totalMvEl.textContent = "—";
+      totalCbEl.textContent = "—";
+      totalPnlEl.textContent = "—";
+      totalPnlEl.className = "";
+      renderPositions();
+      setStatus("success", `Portfolio geladen: ${currentPortfolio.name} (#${currentPortfolio.id})`);
+    }
+
+    async function createPortfolio() {
+      const name = (newPortfolioName.value || "").trim();
+      if (!name) return;
+      setStatus("info", "Lege Portfolio an…");
+      const p = await api("/api/portfolios", { method: "POST", body: JSON.stringify({ name }) });
+      newPortfolioName.value = "";
+      await loadPortfolios(p.id);
+      setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id})`);
+    }
+
+    async function savePosition() {
+      if (!currentPortfolio) return;
       const isin = (isinEl.value || "").trim().toUpperCase();
-      ws.send(JSON.stringify({ type: "subscribe", isin }));
-      setStatus("info", "Subscribe gesendet…");
-    };
+      const qty = Number(qtyEl.value);
+      const entry = Number(entryEl.value);
 
-    // Komfort: Enter im Input
-    isinEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") btn.click();
-    });
+      if (!isin || !isFinite(qty) || qty <= 0 || !isFinite(entry) || entry <= 0) {
+        setStatus("error", "Bitte ISIN, Quantity (>0) und Entry Price (>0) angeben.");
+        return;
+      }
+
+      const next = currentPositions
+        .filter(p => p.isin !== isin)
+        .map(p => ({ isin: p.isin, quantity: p.quantity, entry_price: p.entry_price }));
+      next.push({ isin, quantity: qty, entry_price: entry });
+
+      setStatus("info", "Speichere Positionen…");
+      const data = await api(`/api/portfolios/${currentPortfolio.id}/positions`, {
+        method: "PUT",
+        body: JSON.stringify(next),
+      });
+      currentPositions = data.positions || [];
+      renderPositions();
+      setStatus("success", "Position gespeichert.");
+    }
+
+    async function valuePortfolio() {
+      if (!currentPortfolio) return;
+      setStatus("info", "Bewerte Portfolio (Bid)…");
+      const res = await api(`/api/portfolios/${currentPortfolio.id}/value`, { method: "POST" });
+
+      const byIsin = {};
+      for (const p of (res.positions || [])) byIsin[p.isin] = p;
+
+      valuedAtEl.textContent = res.valued_at || "—";
+      totalMvEl.textContent = fmtNum(res.totals?.market_value, 6);
+      totalCbEl.textContent = fmtNum(res.totals?.cost_basis, 6);
+      totalPnlEl.textContent = fmtNum(res.totals?.pnl, 6);
+      totalPnlEl.className = clsPnL(res.totals?.pnl);
+
+      renderPositions(byIsin);
+      setStatus("success", "Bewertung abgeschlossen.");
+    }
+
+    reloadBtn.onclick = () => loadPortfolios(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
+    createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
+    portfolioSelect.onchange = () => loadPortfolio(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
+    addPosBtn.onclick = () => savePosition().catch(e => setStatus("error", String(e.message || e)));
+    valueBtn.onclick = () => valuePortfolio().catch(e => setStatus("error", String(e.message || e)));
+
+    loadPortfolios().catch(e => setStatus("error", String(e.message || e)));
   </script>
 </body>
 </html>
