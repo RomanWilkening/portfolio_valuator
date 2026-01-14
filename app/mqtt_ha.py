@@ -265,20 +265,21 @@ class HomeAssistantMqttPublisher:
                 market_value = pos.get("market_value")
                 p_pnl = pos.get("pnl")
                 p_pnl_pct = pos.get("pnl_pct")
+                pos_currency = (pos.get("currency") or currency or "EUR").strip().upper()
 
                 pbase = f"position_{pos_id}"
                 add_sensor(f"{pbase}_stueck", f"{pos_id} Stück", round(float(qty or 0.0), 2), "stk", None, {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
-                add_sensor(f"{pbase}_kurs", f"{pos_id} Kurs", round(float(bid or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
-                add_sensor(f"{pbase}_basis", f"{pos_id} Basis", round(float(cost_basis or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
-                add_sensor(f"{pbase}_wert", f"{pos_id} Wert", round(float(market_value or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
-                add_sensor(f"{pbase}_performance", f"{pos_id} Performance", round(float(p_pnl or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
+                add_sensor(f"{pbase}_kurs", f"{pos_id} Kurs", round(float(bid or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_basis", f"{pos_id} Basis", round(float(cost_basis or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_wert", f"{pos_id} Wert", round(float(market_value or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_performance", f"{pos_id} Performance", round(float(p_pnl or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
                 add_sensor(
                     f"{pbase}_performance_pct",
                     f"{pos_id} Performance%",
                     round(float((p_pnl_pct or 0.0) * 100.0), 2),
                     "%",
                     None,
-                    {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid},
+                    {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency},
                 )
 
         # Watchlist

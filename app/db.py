@@ -38,6 +38,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           isin TEXT NOT NULL,
           quantity REAL NOT NULL,
           entry_price REAL NOT NULL,
+          currency TEXT NOT NULL DEFAULT 'EUR',
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE,
           UNIQUE (portfolio_id, isin)
@@ -68,6 +69,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
         if "currency" not in cols:
             conn.execute("ALTER TABLE watchlist ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR';")
+    except Exception:
+        pass
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
+        if "currency" not in cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR';")
     except Exception:
         pass
     conn.commit()

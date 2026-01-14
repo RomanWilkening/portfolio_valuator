@@ -776,6 +776,7 @@ class PositionIn(BaseModel):
     isin: str
     quantity: float = Field(gt=0)
     entry_price: float = Field(gt=0)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
 
 
 class PortfolioOut(BaseModel):
@@ -952,7 +953,7 @@ async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
 
     cur2 = _conn.execute(
-        "SELECT id, isin, quantity, entry_price FROM positions WHERE portfolio_id=? ORDER BY id ASC",
+        "SELECT id, isin, quantity, entry_price, currency FROM positions WHERE portfolio_id=? ORDER BY id ASC",
         (portfolio_id,),
     )
     return {"portfolio": dict(row), "positions": [dict(r) for r in cur2.fetchall()]}
@@ -986,9 +987,11 @@ async def update_portfolio(portfolio_id: int, body: PortfolioUpdate) -> Dict[str
 @app.put("/api/portfolios/{portfolio_id}/positions")
 async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> Dict[str, Any]:
     # Ensure portfolio exists
-    cur = _conn.execute("SELECT id FROM portfolios WHERE id=?", (portfolio_id,))
-    if not cur.fetchone():
+    cur = _conn.execute("SELECT id, currency FROM portfolios WHERE id=?", (portfolio_id,))
+    prow = cur.fetchone()
+    if not prow:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+    portfolio_currency = (prow["currency"] or "EUR").strip().upper()
 
     cleaned: List[PositionIn] = []
     seen: set[str] = set()
@@ -997,14 +1000,15 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
         if isin in seen:
             raise HTTPException(status_code=400, detail=f"Doppelte ISIN im Request: {isin}")
         seen.add(isin)
-        cleaned.append(PositionIn(isin=isin, quantity=p.quantity, entry_price=p.entry_price))
+        currency = (p.currency or portfolio_currency).strip().upper()
+        cleaned.append(PositionIn(isin=isin, quantity=p.quantity, entry_price=p.entry_price, currency=currency))
 
     with _conn:
         _conn.execute("DELETE FROM positions WHERE portfolio_id=?", (portfolio_id,))
         for p in cleaned:
             _conn.execute(
-                "INSERT INTO positions(portfolio_id, isin, quantity, entry_price) VALUES (?,?,?,?)",
-                (portfolio_id, p.isin, p.quantity, p.entry_price),
+                "INSERT INTO positions(portfolio_id, isin, quantity, entry_price, currency) VALUES (?,?,?,?,?)",
+                (portfolio_id, p.isin, p.quantity, p.entry_price, (p.currency or portfolio_currency)),
             )
 
     stream_manager.mark_dirty()
@@ -1036,13 +1040,13 @@ async def delete_position(portfolio_id: int, position_id: int) -> None:
 
 @app.post("/api/portfolios/{portfolio_id}/value")
 async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
-    cur = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,))
+    cur = _conn.execute("SELECT id, name, currency FROM portfolios WHERE id=?", (portfolio_id,))
     portfolio = cur.fetchone()
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
 
     cur2 = _conn.execute(
-        "SELECT id, isin, quantity, entry_price FROM positions WHERE portfolio_id=? ORDER BY id ASC",
+        "SELECT id, isin, quantity, entry_price, currency FROM positions WHERE portfolio_id=? ORDER BY id ASC",
         (portfolio_id,),
     )
     positions = [dict(r) for r in cur2.fetchall()]
