@@ -89,6 +89,12 @@
       <input id="isin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
       <input id="qty" type="number" step="any" min="0" placeholder="Quantity" />
       <input id="entry" type="number" step="any" min="0" placeholder="Entry Price" />
+      <select id="posCurrency" title="Währung" style="min-width: 110px;">
+        <option value="EUR">EUR</option>
+        <option value="USD">USD</option>
+        <option value="CHF">CHF</option>
+        <option value="GBP">GBP</option>
+      </select>
       <button id="addPosBtn">Speichern</button>
     </div>
 
@@ -98,6 +104,7 @@
           <th>ISIN</th>
           <th class="right">Quantity</th>
           <th class="right">Entry</th>
+          <th>Währung</th>
           <th></th>
         </tr>
       </thead>
@@ -129,6 +136,7 @@
     const isinEl = document.getElementById("isin");
     const qtyEl = document.getElementById("qty");
     const entryEl = document.getElementById("entry");
+    const posCurrencyEl = document.getElementById("posCurrency");
     const addPosBtn = document.getElementById("addPosBtn");
 
     function setStatus(level, message) {
@@ -154,13 +162,13 @@
     }
 
     let currentPortfolio = null; // {id,name}
-    let currentPositions = []; // [{id,isin,quantity,entry_price}]
+    let currentPositions = []; // [{id,isin,quantity,entry_price,currency}]
 
     function renderPositions() {
       tbody.innerHTML = "";
       for (const p of currentPositions) {
         const tr = document.createElement("tr");
-        const tds = [p.isin, fmtNum(p.quantity), fmtNum(p.entry_price)];
+        const tds = [p.isin, fmtNum(p.quantity), fmtNum(p.entry_price), (p.currency || "EUR")];
         tds.forEach((val, i) => {
           const td = document.createElement("td");
           td.textContent = val;
@@ -221,6 +229,7 @@
       currentPositions = data.positions || [];
       activeCurrencyEl.textContent = currentPortfolio.currency || "EUR";
       activeCurrencySelect.value = (currentPortfolio.currency || "EUR").toUpperCase();
+      posCurrencyEl.value = (currentPortfolio.currency || "EUR").toUpperCase();
       renderPositions();
       setStatus("success", `Portfolio geladen: ${currentPortfolio.name} (#${currentPortfolio.id})`);
     }
@@ -286,6 +295,7 @@
       const isin = (isinEl.value || "").trim().toUpperCase();
       const qty = Number(qtyEl.value);
       const entry = Number(entryEl.value);
+      const currency = (posCurrencyEl.value || (currentPortfolio.currency || "EUR")).trim().toUpperCase();
 
       if (!isin || !isFinite(qty) || qty <= 0 || !isFinite(entry) || entry <= 0) {
         setStatus("error", "Bitte ISIN, Quantity (>0) und Entry Price (>0) angeben.");
@@ -294,8 +304,8 @@
 
       const next = currentPositions
         .filter(p => p.isin !== isin)
-        .map(p => ({ isin: p.isin, quantity: p.quantity, entry_price: p.entry_price }));
-      next.push({ isin, quantity: qty, entry_price: entry });
+        .map(p => ({ isin: p.isin, quantity: p.quantity, entry_price: p.entry_price, currency: p.currency }));
+      next.push({ isin, quantity: qty, entry_price: entry, currency });
 
       setStatus("info", "Speichere Positionen…");
       const data = await api(`/api/portfolios/${currentPortfolio.id}/positions`, {
