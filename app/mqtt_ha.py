@@ -1,10 +1,11 @@
 import json
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Set
 
 import paho.mqtt.client as mqtt
 
@@ -18,6 +19,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _slug(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"[^a-z0-9_]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s or "sensor"
+
+
 @dataclass(frozen=True)
 class MqttSettings:
     host: str
@@ -28,34 +36,19 @@ class MqttSettings:
 
     discovery_prefix: str
     node_id: str
-    object_id: str
-
     base_topic: str
     qos: int
     retain: bool
     debounce_ms: int
 
     @property
-    def state_topic(self) -> str:
-        return f"{self.base_topic}/state"
-
-    @property
-    def attributes_topic(self) -> str:
-        return f"{self.base_topic}/attributes"
-
-    @property
     def availability_topic(self) -> str:
         return f"{self.base_topic}/availability"
-
-    @property
-    def discovery_topic(self) -> str:
-        return f"{self.discovery_prefix}/sensor/{self.node_id}/{self.object_id}/config"
 
 
 def load_mqtt_settings() -> MqttSettings:
     host = (os.getenv("MQTT_HOST") or "").strip()
     node_id = (os.getenv("MQTT_NODE_ID") or "").strip() or "portfolio_valuator"
-    object_id = (os.getenv("MQTT_OBJECT_ID") or "").strip() or "portfolio"
     base_topic = (os.getenv("MQTT_BASE_TOPIC") or "").strip() or f"portfolio_valuator/{node_id}"
 
     return MqttSettings(
@@ -66,7 +59,6 @@ def load_mqtt_settings() -> MqttSettings:
         client_id=(os.getenv("MQTT_CLIENT_ID") or "").strip() or f"portfolio-valuator-{socket.gethostname()}",
         discovery_prefix=(os.getenv("MQTT_DISCOVERY_PREFIX") or "").strip() or "homeassistant",
         node_id=node_id,
-        object_id=object_id,
         base_topic=base_topic,
         qos=int(os.getenv("MQTT_QOS", "0")),
         retain=_env_bool("MQTT_RETAIN", default=True),
@@ -76,16 +68,19 @@ def load_mqtt_settings() -> MqttSettings:
 
 class HomeAssistantMqttPublisher:
     """
-    Publiziert eine einzelne Home-Assistant MQTT Discovery Sensor-Entität:
-    - state_topic: ein kompakter numerischer State (Default: total_market_value)
-    - attributes_topic: JSON mit Portfolios/Positionen/Watchlist (größerer Payload)
+    Publiziert MQTT-Discovery Sensoren für:
+    - alle Portfolios (Wert/Basis/Performance/Performance%)
+    - alle Positionen (Stück/Kurs/Basis/Wert/Performance/Performance%)
+    - Watchlist (Kurs)
+
+    Home Assistant Auto-Detect per MQTT Discovery.
     """
 
     def __init__(self, settings: MqttSettings) -> None:
         self.s = settings
         self.client: Optional[mqtt.Client] = None
-        self._connected = False
         self._last_publish_ts = 0.0
+        self._known_objects: Set[str] = set()
 
     def connect(self) -> None:
         if not self.s.host:
@@ -96,20 +91,14 @@ class HomeAssistantMqttPublisher:
             client.username_pw_set(self.s.username, self.s.password)
 
         def on_connect(c, userdata, flags, rc, properties=None):  # type: ignore[no-untyped-def]
-            self._connected = True
             logger.info("MQTT connected (rc=%s)", rc)
-            # Availability online + discovery config (retained)
             c.publish(self.s.availability_topic, payload="online", qos=self.s.qos, retain=True)
-            self.publish_discovery()
 
         def on_disconnect(c, userdata, rc, properties=None):  # type: ignore[no-untyped-def]
-            self._connected = False
             logger.warning("MQTT disconnected (rc=%s)", rc)
 
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
-
-        # "Last will" for availability
         client.will_set(self.s.availability_topic, payload="offline", qos=self.s.qos, retain=True)
         client.connect(self.s.host, self.s.port, keepalive=30)
         client.loop_start()
@@ -131,23 +120,37 @@ class HomeAssistantMqttPublisher:
         except Exception:
             pass
         self.client = None
-        self._connected = False
 
-    def publish_discovery(self) -> None:
+    def _discovery_topic(self, object_id: str) -> str:
+        return f"{self.s.discovery_prefix}/sensor/{self.s.node_id}/{object_id}/config"
+
+    def _state_topic(self, object_id: str) -> str:
+        return f"{self.s.base_topic}/sensors/{object_id}/state"
+
+    def _attributes_topic(self, object_id: str) -> str:
+        return f"{self.s.base_topic}/sensors/{object_id}/attributes"
+
+    def _publish_discovery(
+        self,
+        *,
+        object_id: str,
+        name: str,
+        unit: Optional[str] = None,
+        device_class: Optional[str] = None,
+        state_class: Optional[str] = "measurement",
+        extra_attrs: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if not self.client:
             return
 
-        # Single sensor with attributes JSON
-        unique_id = f"{self.s.node_id}_{self.s.object_id}"
         payload: Dict[str, Any] = {
-            "name": "Portfolio Valuator",
-            "unique_id": unique_id,
-            "state_topic": self.s.state_topic,
-            "json_attributes_topic": self.s.attributes_topic,
+            "name": name,
+            "unique_id": f"{self.s.node_id}_{object_id}",
+            "state_topic": self._state_topic(object_id),
+            "json_attributes_topic": self._attributes_topic(object_id),
             "availability_topic": self.s.availability_topic,
             "payload_available": "online",
             "payload_not_available": "offline",
-            "icon": "mdi:chart-line",
             "device": {
                 "identifiers": [self.s.node_id],
                 "name": "Portfolio Valuator",
@@ -155,77 +158,152 @@ class HomeAssistantMqttPublisher:
                 "model": "bnpp-ls-portfolio-valuator",
             },
         }
+        if unit:
+            payload["unit_of_measurement"] = unit
+        if device_class:
+            payload["device_class"] = device_class
+        if state_class:
+            payload["state_class"] = state_class
+        if extra_attrs:
+            payload["json_attributes_template"] = "{{ value_json | tojson }}"
 
         self.client.publish(
-            self.s.discovery_topic,
+            self._discovery_topic(object_id),
             payload=json.dumps(payload, ensure_ascii=False),
             qos=self.s.qos,
             retain=True,
         )
 
-    def publish_now(self, state_value: Any, attributes: Dict[str, Any]) -> None:
+    def _publish_state(self, object_id: str, state_value: Any, attributes: Dict[str, Any]) -> None:
         if not self.client:
             return
-
-        # Debounce in-process (best-effort)
-        now = time.time()
-        min_dt = self.s.debounce_ms / 1000.0
-        if min_dt > 0 and (now - self._last_publish_ts) < min_dt:
-            return
-        self._last_publish_ts = now
-
         self.client.publish(
-            self.s.state_topic,
+            self._state_topic(object_id),
             payload=str(state_value),
             qos=self.s.qos,
             retain=self.s.retain,
         )
         self.client.publish(
-            self.s.attributes_topic,
+            self._attributes_topic(object_id),
             payload=json.dumps(attributes, ensure_ascii=False),
             qos=self.s.qos,
             retain=self.s.retain,
         )
 
+    def _debounced(self) -> bool:
+        now = time.time()
+        min_dt = self.s.debounce_ms / 1000.0
+        if min_dt > 0 and (now - self._last_publish_ts) < min_dt:
+            return True
+        self._last_publish_ts = now
+        return False
 
-def build_entity_payload(
-    *,
-    portfolios: list[dict],
-    watchlist: list[dict],
-    meta: Optional[Dict[str, Any]] = None,
-) -> Tuple[float, Dict[str, Any]]:
-    """
-    Returns (state, attributes) for the single HA entity.
-    State is numeric total_market_value to keep state short.
-    """
-    total_mv = 0.0
-    total_cb = 0.0
-    total_pnl = 0.0
+    def publish_all(self, *, portfolios: list[dict], watchlist: list[dict]) -> None:
+        if not self.client:
+            return
+        if self._debounced():
+            return
 
-    for pf in portfolios:
-        totals = (pf or {}).get("totals") or {}
-        mv = totals.get("market_value")
-        cb = totals.get("cost_basis")
-        pnl = totals.get("pnl")
-        if isinstance(mv, (int, float)):
-            total_mv += float(mv)
-        if isinstance(cb, (int, float)):
-            total_cb += float(cb)
-        if isinstance(pnl, (int, float)):
-            total_pnl += float(pnl)
+        desired: Set[str] = set()
 
-    attrs: Dict[str, Any] = {
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "totals": {
-            "market_value": round(total_mv, 2),
-            "cost_basis": round(total_cb, 2),
-            "pnl": round(total_pnl, 2),
-        },
-        "portfolios": portfolios,
-        "watchlist": watchlist,
-    }
-    if meta:
-        attrs["meta"] = meta
+        def add_sensor(
+            object_id: str,
+            name: str,
+            value: Any,
+            unit: Optional[str],
+            device_class: Optional[str],
+            attrs: Dict[str, Any],
+        ) -> None:
+            oid = _slug(object_id)
+            desired.add(oid)
+            if oid not in self._known_objects:
+                self._publish_discovery(
+                    object_id=oid,
+                    name=name,
+                    unit=unit,
+                    device_class=device_class,
+                    state_class="measurement",
+                    extra_attrs=attrs,
+                )
+            self._publish_state(oid, value, attrs)
 
-    return round(total_mv, 2), attrs
+        # Portfolios + Positionen
+        for pf in portfolios:
+            pfo = (pf or {}).get("portfolio") or {}
+            pid = pfo.get("id")
+            currency = (pf or {}).get("currency") or "EUR"
+            totals = (pf or {}).get("totals") or {}
+            mv = totals.get("market_value")
+            cb = totals.get("cost_basis")
+            pnl = totals.get("pnl")
+            pnl_pct = totals.get("pnl_pct")
+
+            if pid is None:
+                continue
+
+            base = f"portfolio_{pid}"
+            add_sensor(f"{base}_wert", f"{pid} Wert", round(float(mv or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio"})
+            add_sensor(f"{base}_basis", f"{pid} Basis", round(float(cb or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio"})
+            add_sensor(f"{base}_performance", f"{pid} Performance", round(float(pnl or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio"})
+            add_sensor(
+                f"{base}_performance_pct",
+                f"{pid} Performance%",
+                round(float((pnl_pct or 0.0) * 100.0), 2),
+                "%",
+                None,
+                {"id": pid, "type": "portfolio"},
+            )
+
+            for pos in (pf or {}).get("positions") or []:
+                pos_id = pos.get("id")
+                if pos_id is None:
+                    continue
+                isin = pos.get("isin")
+                qty = pos.get("quantity")
+                bid = pos.get("bid")
+                cost_basis = pos.get("cost_basis")
+                market_value = pos.get("market_value")
+                p_pnl = pos.get("pnl")
+                p_pnl_pct = pos.get("pnl_pct")
+
+                pbase = f"position_{pos_id}"
+                add_sensor(f"{pbase}_stueck", f"{pos_id} Stück", round(float(qty or 0.0), 2), "stk", None, {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
+                add_sensor(f"{pbase}_kurs", f"{pos_id} Kurs", round(float(bid or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
+                add_sensor(f"{pbase}_basis", f"{pos_id} Basis", round(float(cost_basis or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
+                add_sensor(f"{pbase}_wert", f"{pos_id} Wert", round(float(market_value or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
+                add_sensor(f"{pbase}_performance", f"{pos_id} Performance", round(float(p_pnl or 0.0), 2), currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
+                add_sensor(
+                    f"{pbase}_performance_pct",
+                    f"{pos_id} Performance%",
+                    round(float((p_pnl_pct or 0.0) * 100.0), 2),
+                    "%",
+                    None,
+                    {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid},
+                )
+
+        # Watchlist
+        for w in watchlist:
+            wid = w.get("id")
+            if wid is None:
+                continue
+            label = (w.get("label") or "").strip()
+            key = w.get("key") or w.get("isin")
+            currency = (w.get("currency") or "EUR").strip().upper()
+            price = w.get("price")
+            field = w.get("field")
+            name = f"{wid} Kurs" + (f" ({label})" if label else f" ({key})")
+            add_sensor(
+                f"watchlist_{wid}_kurs",
+                name,
+                round(float(price or 0.0), 2),
+                currency,
+                "monetary",
+                {"id": wid, "type": "watchlist", "key": key, "label": label, "field": field},
+            )
+
+        # Cleanup removed sensors (remove discovery)
+        removed = self._known_objects - desired
+        for oid in removed:
+            self.client.publish(self._discovery_topic(oid), payload="", qos=self.s.qos, retain=True)
+        self._known_objects = desired
 

@@ -56,11 +56,13 @@ Die Defaults sind auf die bisherige BNP-Lightstreamer-Konfiguration ausgelegt. B
 
 Wenn `MQTT_HOST` gesetzt ist, kannst du MQTT im Webinterface (Portfolio-Pflege) **aktivieren**. Default ist **aus**.
 
-- **Discovery Topic**: `homeassistant/sensor/<MQTT_NODE_ID>/<MQTT_OBJECT_ID>/config`
-- **State**: `total_market_value` (numerisch, kurz)
-- **Attributes**: JSON mit `portfolios`, `watchlist`, `totals`, `updated_at`
+- Es werden **mehrere Sensoren** per Auto-Discovery angelegt:
+  - pro **Portfolio**: Wert/Basis/Performance/Performance%
+  - pro **Position**: Stück/Kurs/Basis/Wert/Performance/Performance%
+  - pro **Watchlist-Eintrag**: Kurs
+- Währungswerte werden als **`device_class: monetary`** mit **`unit_of_measurement`** (z.B. EUR/USD) publiziert, damit Home Assistant Historie korrekt führt.
 
 Wichtige ENV-Variablen (siehe `config/app.env.example`):
 - `MQTT_HOST`, `MQTT_PORT`, optional `MQTT_USERNAME`, `MQTT_PASSWORD`
-- `MQTT_NODE_ID`, `MQTT_OBJECT_ID`, `MQTT_BASE_TOPIC`
+- `MQTT_NODE_ID`, `MQTT_BASE_TOPIC`
 - `MQTT_DEBOUNCE_MS` (Default 1000ms)

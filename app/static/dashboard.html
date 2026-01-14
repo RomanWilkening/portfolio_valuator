@@ -51,6 +51,12 @@
     <div class="row" style="margin-top: 10px;">
       <input id="watchIsin" placeholder="ISIN (12 Zeichen) oder X0000080800586" style="width: 260px;" />
       <input id="watchLabel" placeholder="Label (optional)" style="min-width: 260px;" />
+      <select id="watchCurrency" title="Währung" style="min-width: 110px;">
+        <option value="EUR">EUR</option>
+        <option value="USD">USD</option>
+        <option value="CHF">CHF</option>
+        <option value="GBP">GBP</option>
+      </select>
       <button id="addWatchBtn">Hinzufügen</button>
     </div>
     <table>
@@ -76,6 +82,7 @@
     const reconnectBtn = document.getElementById("reconnectBtn");
     const watchIsinEl = document.getElementById("watchIsin");
     const watchLabelEl = document.getElementById("watchLabel");
+    const watchCurrencyEl = document.getElementById("watchCurrency");
     const addWatchBtn = document.getElementById("addWatchBtn");
     const watchTbody = document.getElementById("watchTbody");
 
@@ -398,9 +405,10 @@
     addWatchBtn.onclick = async () => {
       const isin = (watchIsinEl.value || "").trim().toUpperCase();
       const label = (watchLabelEl.value || "").trim();
+      const currency = (watchCurrencyEl.value || "EUR").trim().toUpperCase();
       if (!isin) return;
       setStatus("info", "Füge Watchlist-Eintrag hinzu…");
-      const it = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ isin, label: label || null }) });
+      const it = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ isin, label: label || null, currency }) });
       // update UI: reload full watchlist to ensure bid mapping consistent
       const list = await api("/api/watchlist");
       renderWatchlist(list);
