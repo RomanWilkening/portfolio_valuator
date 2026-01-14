@@ -499,8 +499,10 @@ class StreamManager:
 
         while True:
             try:
-                # Wait for at least one client to avoid unnecessary streaming
-                if not self.clients:
+                # Stream läuft, wenn entweder Dashboard-Clients verbunden sind ODER MQTT enabled ist.
+                # So kann MQTT auch ohne geöffnetes Frontend 24/7 Updates bekommen.
+                need_stream = bool(self.clients) or _mqtt_is_enabled()
+                if not need_stream:
                     await asyncio.sleep(0.5)
                     continue
 
@@ -547,8 +549,8 @@ class StreamManager:
                 await sess.subscribe_items(items)
                 await self.broadcast({"type": "status", "level": "success", "message": "Stream verbunden."})
 
-                # Receive loop until dirty flag set -> restart
-                while not self._dirty.is_set():
+                # Receive loop until dirty flag set -> restart (oder bis wir den Stream nicht mehr brauchen)
+                while not self._dirty.is_set() and (self.clients or _mqtt_is_enabled()):
                     try:
                         raw = await sess._recv_text()
                     except ConnectionClosed as e:
@@ -1094,6 +1096,8 @@ async def mqtt_set_enabled(body: Dict[str, Any]) -> Dict[str, Any]:
     _set_mqtt_enabled(enabled)
     if enabled:
         _mqtt_connect_if_enabled()
+        stream_manager.mark_dirty()
     else:
         _mqtt_disconnect()
+        stream_manager.mark_dirty()
     return await mqtt_status()
