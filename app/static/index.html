@@ -166,7 +166,10 @@
           const td = document.createElement("td");
           td.textContent = val;
           if (i >= 1) td.classList.add("right");
-          if (i === 6 || i === 7) td.classList.add(clsPnL(v ? v.pnl : null));
+          if (i === 6 || i === 7) {
+            const c = clsPnL(v ? v.pnl : null);
+            if (c) td.classList.add(c);
+          }
           tr.appendChild(td);
         });
 
