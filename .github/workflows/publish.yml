@@ -52,7 +52,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./bnpp-ls-mvp/Dockerfile       # anpassen, falls deine Dockerfile woanders liegt
+          file: ./Dockerfile       # anpassen, falls deine Dockerfile woanders liegt
           push: true
           platforms: linux/amd64,linux/arm64   # optional: Multi-Arch
           tags: ${{ steps.meta.outputs.tags }}
