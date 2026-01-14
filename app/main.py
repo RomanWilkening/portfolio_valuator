@@ -163,6 +163,9 @@ async def _ws_connect() -> Any:
             for send_ua in (True, False):
                 kwargs: Dict[str, Any] = {
                     "ping_interval": None,  # Lightstreamer nutzt eigene PROBE
+                    # Lightstreamer-WS kann empfindlich auf Extensions reagieren.
+                    # PerMessage-Deflate deaktivieren hilft oft bei kryptischen 1011-Abbrüchen.
+                    "compression": None,
                 }
                 if proto is not None:
                     kwargs["subprotocols"] = [proto]
@@ -252,7 +255,8 @@ class LightstreamerSession:
             f"&LS_cause=api"
             f"&LS_password="
         )
-        msg = "create_session\n" + create_params + "\n"
+        # Lightstreamer TLCP ist zeilenbasiert; CRLF ist am kompatibelsten.
+        msg = "create_session\r\n" + create_params + "\r\n"
         await self.websocket.send(msg)
         logger.info("Sent create_session")
 
@@ -297,7 +301,7 @@ class LightstreamerSession:
             f"&LS_session={quote(self.session_id)}"
         )
 
-        msg = "control\n" + params + "\n"
+        msg = "control\r\n" + params + "\r\n"
         await self.websocket.send(msg)
         logger.info("Subscribed to %s (item=%s)", self.current_isin, self.current_item)
         self.req_id += 1
