@@ -84,10 +84,10 @@
       statusEl.textContent = message;
     }
 
-    function fmtNum(n, digits=4) {
+    function fmtNum(n) {
       if (n === null || n === undefined) return "—";
       if (!isFinite(n)) return "—";
-      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function fmtPct(x) {
@@ -148,7 +148,7 @@
         tdIsin.textContent = isin;
 
         const bid = state.bids.get(isin);
-        tdBid.textContent = (bid === undefined) ? "—" : fmtNum(bid, 6);
+        tdBid.textContent = (bid === undefined) ? "—" : fmtNum(bid);
 
         const btn = document.createElement("button");
         btn.textContent = "Entfernen";
@@ -198,9 +198,9 @@
         header.className = "row";
         header.innerHTML = `
           <h2 style="margin:0; flex:1 1 auto;">${pf.name} <span class="muted">(#${pf.id})</span></h2>
-          <span class="pill">Market Value: <strong data-t="mv">${fmtNum(v.totals?.market_value, 6)}</strong></span>
-          <span class="pill">Cost Basis: <strong data-t="cb">${fmtNum(v.totals?.cost_basis, 6)}</strong></span>
-          <span class="pill">PnL: <strong data-t="pnl" class="${clsPnL(v.totals?.pnl)}">${fmtNum(v.totals?.pnl, 6)}</strong></span>
+          <span class="pill">Market Value: <strong data-t="mv">${fmtNum(v.totals?.market_value)}</strong></span>
+          <span class="pill">Cost Basis: <strong data-t="cb">${fmtNum(v.totals?.cost_basis)}</strong></span>
+          <span class="pill">PnL: <strong data-t="pnl" class="${clsPnL(v.totals?.pnl)}">${fmtNum(v.totals?.pnl)}</strong></span>
           <span class="pill muted">valued_at: <strong data-t="at">${v.valued_at || "—"}</strong></span>
         `;
         card.appendChild(header);
@@ -247,12 +247,12 @@
 
           const cells = [
             isin,
-            fmtNum(p.quantity, 6),
-            fmtNum(p.entry_price, 6),
-            (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid, 6),
-            (p.market_value === null || p.market_value === undefined) ? "—" : fmtNum(p.market_value, 6),
-            fmtNum(p.cost_basis, 6),
-            (p.pnl === null || p.pnl === undefined) ? "—" : fmtNum(p.pnl, 6),
+            fmtNum(p.quantity),
+            fmtNum(p.entry_price),
+            (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid),
+            (p.market_value === null || p.market_value === undefined) ? "—" : fmtNum(p.market_value),
+            fmtNum(p.cost_basis),
+            (p.pnl === null || p.pnl === undefined) ? "—" : fmtNum(p.pnl),
             (p.pnl_pct === null || p.pnl_pct === undefined) ? "—" : fmtPct(p.pnl_pct),
           ];
 
@@ -292,9 +292,9 @@
         if (bid !== undefined) mv += bid * pos.quantity;
       }
       const pnl = mv - cb;
-      pf.totalsEl.mv.textContent = fmtNum(mv, 6);
-      pf.totalsEl.cb.textContent = fmtNum(cb, 6);
-      pf.totalsEl.pnl.textContent = fmtNum(pnl, 6);
+      pf.totalsEl.mv.textContent = fmtNum(mv);
+      pf.totalsEl.cb.textContent = fmtNum(cb);
+      pf.totalsEl.pnl.textContent = fmtNum(pnl);
       pf.totalsEl.pnl.className = clsPnL(pnl);
       pf.totalsEl.at.textContent = new Date().toISOString();
     }
@@ -307,7 +307,7 @@
       const wid = state.watch.idByIsin.get(isin);
       if (wid !== undefined) {
         const row = state.watch.rowById.get(wid);
-        if (row) row.bidEl.textContent = fmtNum(bid, 6);
+        if (row) row.bidEl.textContent = fmtNum(bid);
       }
 
       const pids = state.isinsToPortfolios.get(isin);
@@ -325,9 +325,9 @@
         const pnl = mv - cb;
         const pnlPct = cb ? (pnl / cb) : null;
 
-        row.bidEl.textContent = fmtNum(bid, 6);
-        row.mvEl.textContent = fmtNum(mv, 6);
-        row.pnlEl.textContent = fmtNum(pnl, 6);
+        row.bidEl.textContent = fmtNum(bid);
+        row.mvEl.textContent = fmtNum(mv);
+        row.pnlEl.textContent = fmtNum(pnl);
         row.pnlPctEl.textContent = pnlPct === null ? "—" : fmtPct(pnlPct);
 
         row.pnlEl.className = "right " + clsPnL(pnl);

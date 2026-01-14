@@ -91,10 +91,10 @@
       statusEl.textContent = message;
     }
 
-    function fmtNum(n, digits=6) {
+    function fmtNum(n) {
       if (n === null || n === undefined) return "—";
       if (!isFinite(n)) return "—";
-      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     async function api(path, options={}) {
