@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any
 from urllib.parse import quote
+from time import monotonic
 
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -23,6 +24,13 @@ LS_SUBPROTOCOL = os.getenv("LS_SUBPROTOCOL", "TLCP-2.5.0.lightstreamer.com")
 
 LS_ADAPTER_SET = os.getenv("LS_ADAPTER_SET", "SmarthouseFeed")
 LS_DATA_ADAPTER = os.getenv("LS_DATA_ADAPTER", "MDS5")
+
+# Item-Namensschema: je nach Produkt können Prefix/Template variieren.
+# Standard entspricht deiner Beobachtung: X0000010800<ISIN>
+LS_ITEM_TEMPLATE = os.getenv("LS_ITEM_TEMPLATE", "X0000010800{isin}")
+# Optional: mehrere Templates, kommasepariert; werden der Reihe nach probiert.
+# Beispiel: LS_ITEM_TEMPLATES="X0000010800{isin},X0000010799{isin}"
+LS_ITEM_TEMPLATES = os.getenv("LS_ITEM_TEMPLATES", "")
 
 # "Browser-ähnliche" Defaults, kann angepasst werden.
 LS_CID = os.getenv(
@@ -66,7 +74,45 @@ def isin_to_item(isin: str) -> str:
     # Minimalvalidierung (ISIN ist typischerweise 12 Zeichen, alphanumerisch)
     if not re.fullmatch(r"[A-Z0-9]{12}", isin):
         raise ValueError("ISIN muss 12 Zeichen (A-Z/0-9) sein.")
-    return f"X0000010800{isin}"
+    tmpl = (LS_ITEM_TEMPLATE or "").strip() or "X0000010800{isin}"
+    if "{isin}" not in tmpl:
+        raise ValueError("LS_ITEM_TEMPLATE muss '{isin}' enthalten.")
+    return tmpl.format(isin=isin)
+
+
+def items_for_isin(isin: str) -> List[str]:
+    """
+    Liefert eine Liste möglicher Item-Namen für eine ISIN (Template-Fallbacks).
+    Wenn LS_ITEM_TEMPLATES gesetzt ist, werden diese in Reihenfolge genutzt,
+    ansonsten LS_ITEM_TEMPLATE.
+    """
+    isin = isin.strip().upper()
+    # Validiert ISIN (wirft ggf. ValueError)
+    _ = isin_to_item(isin)
+
+    templates_raw = (LS_ITEM_TEMPLATES or "").strip()
+    templates: List[str] = []
+    if templates_raw:
+        for t in templates_raw.split(","):
+            t = t.strip()
+            if not t:
+                continue
+            templates.append(t)
+    else:
+        templates.append((LS_ITEM_TEMPLATE or "").strip() or "X0000010800{isin}")
+
+    items: List[str] = []
+    for t in templates:
+        if "{isin}" not in t:
+            continue
+        item = t.format(isin=isin)
+        if item not in items:
+            items.append(item)
+
+    # Falls nichts übrig bleibt, nimm den Default.
+    if not items:
+        items.append(f"X0000010800{isin}")
+    return items
 
 
 def _try_num(v: Optional[str]) -> Any:
@@ -275,12 +321,12 @@ class LightstreamerSession:
                         logger.info("Lightstreamer session established: %s", self.session_id)
                         return
 
-    async def subscribe_isin(self, isin: str) -> None:
+    async def subscribe_isin(self, isin: str, item: Optional[str] = None) -> None:
         if not self.websocket or not self.session_id:
             raise RuntimeError("Session not connected")
 
         self.current_isin = isin.strip().upper()
-        self.current_item = isin_to_item(self.current_isin)
+        self.current_item = item or isin_to_item(self.current_isin)
 
         # Subscription control (add)
         # Schema muss URL-encoded sein (Spaces -> %20)
@@ -420,32 +466,80 @@ async def run_ls_stream(isin: str) -> None:
     Läuft, bis Task gecancelt wird.
     """
     global ls_session
-    sess = LightstreamerSession()
 
     try:
-        await broadcast({"type": "status", "level": "info", "message": "Verbinde zu BNP Push..."})
-        await sess.connect()
-        await broadcast({"type": "status", "level": "info", "message": "Session OK, subscribe..."})
-        await sess.subscribe_isin(isin)
-        await broadcast({"type": "status", "level": "success", "message": f"Subscribed: {isin}"})
+        # Manche ISINs benötigen andere Item-Prefixe/Templates.
+        # Wir versuchen mehrere Items der Reihe nach, bis wir mindestens ein Quote (U,...) sehen.
+        first_quote_timeout_s = float(os.getenv("LS_FIRST_QUOTE_TIMEOUT", "6"))
+        candidate_items = items_for_isin(isin)
 
-        ls_session = sess
+        for idx, item in enumerate(candidate_items, start=1):
+            sess = LightstreamerSession()
+            got_first_quote = False
 
-        while True:
             try:
-                raw = await sess._recv_text()
-            except ConnectionClosed as e:
-                # websockets liefert Close-Code/Reason – das ist die wichtigste Info beim Debuggen.
-                raise RuntimeError(f"WS closed: code={e.code} reason={e.reason}") from e
+                await broadcast({"type": "status", "level": "info", "message": "Verbinde zu BNP Push..."})
+                await sess.connect()
+                await broadcast({"type": "status", "level": "info", "message": f"Session OK, subscribe (Versuch {idx}/{len(candidate_items)})..."})
+                await sess.subscribe_isin(isin, item=item)
+                await broadcast({"type": "status", "level": "success", "message": f"Subscribed: {isin} (item={item})"})
 
-            for line in sess._split_lines(raw):
-                # Wenn Lightstreamer einen Request ablehnt, sehen wir das hier.
-                if line.startswith("REQERR,") or line.startswith("ERROR,"):
-                    raise RuntimeError(f"Lightstreamer error: {line}")
+                ls_session = sess
 
-                evt = sess.handle_line(line)
-                if evt:
-                    await broadcast(evt)
+                # Phase 1: Warte auf erstes Quote (Snapshot/Update), sonst nächstes Template probieren.
+                deadline = monotonic() + first_quote_timeout_s
+                while not got_first_quote and monotonic() < deadline:
+                    timeout = max(0.2, deadline - monotonic())
+                    try:
+                        raw = await asyncio.wait_for(sess._recv_text(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        continue
+                    except ConnectionClosed as e:
+                        raise RuntimeError(f"WS closed: code={e.code} reason={e.reason}") from e
+
+                    for line in sess._split_lines(raw):
+                        if line.startswith("REQERR,") or line.startswith("ERROR,"):
+                            raise RuntimeError(f"Lightstreamer error: {line}")
+
+                        evt = sess.handle_line(line)
+                        if evt:
+                            got_first_quote = True
+                            await broadcast(evt)
+
+                if not got_first_quote:
+                    await broadcast({
+                        "type": "status",
+                        "level": "warn",
+                        "message": f"Keine Quote-Daten nach {first_quote_timeout_s:.0f}s (item={item}). Probiere nächste Variante…",
+                    })
+                    await sess.close()
+                    continue
+
+                # Phase 2: Normaler Stream
+                while True:
+                    try:
+                        raw = await sess._recv_text()
+                    except ConnectionClosed as e:
+                        raise RuntimeError(f"WS closed: code={e.code} reason={e.reason}") from e
+
+                    for line in sess._split_lines(raw):
+                        if line.startswith("REQERR,") or line.startswith("ERROR,"):
+                            raise RuntimeError(f"Lightstreamer error: {line}")
+
+                        evt = sess.handle_line(line)
+                        if evt:
+                            await broadcast(evt)
+
+            finally:
+                # Wenn wir erfolgreich streamen, wird dieser Block durch Cancellation/Exception verlassen.
+                if not got_first_quote:
+                    try:
+                        await sess.close()
+                    except Exception:
+                        pass
+
+        # Alle Varianten ohne Quote -> harte Fehlermeldung.
+        await broadcast({"type": "status", "level": "error", "message": f"Keine Daten für ISIN {isin} (alle Item-Varianten ohne Quote)."})
 
     except asyncio.CancelledError:
         await broadcast({"type": "status", "level": "warn", "message": "Stream gestoppt."})
@@ -455,7 +549,8 @@ async def run_ls_stream(isin: str) -> None:
         await broadcast({"type": "status", "level": "error", "message": f"Fehler im Stream: {e}"})
     finally:
         try:
-            await sess.close()
+            if ls_session:
+                await ls_session.close()
         except Exception:
             pass
 
