@@ -439,6 +439,57 @@ async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
     return PortfolioOut(id=int(cur.lastrowid), name=body.name.strip())
 
 
+@app.get("/api/portfolios/valuations")
+async def value_all_portfolios() -> List[Dict[str, Any]]:
+    """
+    Bewertet alle Portfolios in einem Request.
+    Wichtig: Wir holen alle Bid-Quotes gesammelt in *einer* Lightstreamer-Session,
+    um die Bewertung kontinuierlich (Polling) effizient zu halten.
+    """
+    cur = _conn.execute("SELECT id, name FROM portfolios ORDER BY id DESC")
+    portfolios = [dict(r) for r in cur.fetchall()]
+    if not portfolios:
+        return []
+
+    cur2 = _conn.execute(
+        """
+        SELECT id, portfolio_id, isin, quantity, entry_price
+        FROM positions
+        ORDER BY portfolio_id DESC, id ASC
+        """
+    )
+    positions_all = [dict(r) for r in cur2.fetchall()]
+
+    by_portfolio: Dict[int, List[Dict[str, Any]]] = {}
+    all_isins: List[str] = []
+    seen: set[str] = set()
+    for p in positions_all:
+        pid = int(p["portfolio_id"])
+        by_portfolio.setdefault(pid, []).append(p)
+        isin = p["isin"]
+        if isin not in seen:
+            seen.add(isin)
+            all_isins.append(isin)
+
+    valued_at = now_iso()
+    timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
+    bids = await fetch_bids(all_isins, timeout_s=timeout_s) if all_isins else {}
+
+    out: List[Dict[str, Any]] = []
+    for pf in portfolios:
+        pid = int(pf["id"])
+        out.append(
+            compute_valuation(
+                pf,
+                by_portfolio.get(pid, []),
+                bids,
+                valued_at=valued_at,
+                timeout_s=timeout_s,
+            )
+        )
+    return out
+
+
 @app.get("/api/portfolios/{portfolio_id}")
 async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
     cur = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,))
@@ -500,54 +551,3 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
     timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
     bids = await fetch_bids(isins, timeout_s=timeout_s)
     return compute_valuation(dict(portfolio), positions, bids, valued_at=valued_at, timeout_s=timeout_s)
-
-
-@app.get("/api/portfolios/valuations")
-async def value_all_portfolios() -> List[Dict[str, Any]]:
-    """
-    Bewertet alle Portfolios in einem Request.
-    Wichtig: Wir holen alle Bid-Quotes gesammelt in *einer* Lightstreamer-Session,
-    um die Bewertung kontinuierlich (Polling) effizient zu halten.
-    """
-    cur = _conn.execute("SELECT id, name FROM portfolios ORDER BY id DESC")
-    portfolios = [dict(r) for r in cur.fetchall()]
-    if not portfolios:
-        return []
-
-    cur2 = _conn.execute(
-        """
-        SELECT id, portfolio_id, isin, quantity, entry_price
-        FROM positions
-        ORDER BY portfolio_id DESC, id ASC
-        """
-    )
-    positions_all = [dict(r) for r in cur2.fetchall()]
-
-    by_portfolio: Dict[int, List[Dict[str, Any]]] = {}
-    all_isins: List[str] = []
-    seen: set[str] = set()
-    for p in positions_all:
-        pid = int(p["portfolio_id"])
-        by_portfolio.setdefault(pid, []).append(p)
-        isin = p["isin"]
-        if isin not in seen:
-            seen.add(isin)
-            all_isins.append(isin)
-
-    valued_at = now_iso()
-    timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
-    bids = await fetch_bids(all_isins, timeout_s=timeout_s) if all_isins else {}
-
-    out: List[Dict[str, Any]] = []
-    for pf in portfolios:
-        pid = int(pf["id"])
-        out.append(
-            compute_valuation(
-                pf,
-                by_portfolio.get(pid, []),
-                bids,
-                valued_at=valued_at,
-                timeout_s=timeout_s,
-            )
-        )
-    return out
