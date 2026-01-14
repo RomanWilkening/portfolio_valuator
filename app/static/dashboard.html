@@ -58,7 +58,7 @@
         <tr>
           <th>Label</th>
           <th>ISIN</th>
-          <th class="right">Bid</th>
+          <th class="right">Ask</th>
           <th></th>
         </tr>
       </thead>
@@ -117,6 +117,7 @@
       portfolios: new Map(), // pid -> { positions: Map(isin -> posData), totalsEl: {...}, rowsByIsin: Map(isin -> {bidEl,mvEl,pnlEl,pnlPctEl}) }
       isinsToPortfolios: new Map(), // isin -> Set(pid)
       bids: new Map(), // isin -> bid (number)
+      asks: new Map(), // key -> ask (number)
       watch: {
         byId: new Map(), // id -> {isin,label}
         rowById: new Map(), // id -> {bidEl}
@@ -147,8 +148,8 @@
         tdLabel.textContent = label || "—";
         tdIsin.textContent = isin;
 
-        const bid = state.bids.get(isin);
-        tdBid.textContent = (bid === undefined) ? "—" : fmtNum(bid);
+        const ask = state.asks.get(isin);
+        tdBid.textContent = (ask === undefined) ? "—" : fmtNum(ask);
 
         const btn = document.createElement("button");
         btn.textContent = "Entfernen";
@@ -299,21 +300,25 @@
       pf.totalsEl.at.textContent = new Date().toISOString();
     }
 
-    function applyQuoteUpdate(key, bid, quotetime) {
+    function applyQuoteUpdate(key, bid, ask, quotetime) {
       if (!key) return;
       const isin = String(key);
-      state.bids.set(isin, Number(bid));
+      if (bid !== null && bid !== undefined) state.bids.set(isin, Number(bid));
+      if (ask !== null && ask !== undefined) state.asks.set(isin, Number(ask));
       lastQuoteAtEl.textContent = (quotetime && String(quotetime).trim()) ? String(quotetime) : new Date().toLocaleTimeString();
 
       // Watchlist update
       const wid = state.watch.idByIsin.get(isin);
       if (wid !== undefined) {
         const row = state.watch.rowById.get(wid);
-        if (row) row.bidEl.textContent = fmtNum(bid);
+        if (row) {
+          const a = state.asks.get(isin);
+          row.bidEl.textContent = (a === undefined) ? "—" : fmtNum(a);
+        }
       }
 
       const pids = state.isinsToPortfolios.get(isin);
-      if (!pids) return;
+      if (!pids || bid === null || bid === undefined) return;
 
       for (const pid of pids.values()) {
         const pf = state.portfolios.get(pid);
@@ -374,7 +379,7 @@
         }
 
         if (msg.type === "quote") {
-          applyQuoteUpdate(msg.key || msg.isin, msg.bid, msg.quotetime);
+          applyQuoteUpdate(msg.key || msg.isin, msg.bid, msg.ask, msg.quotetime);
         }
       };
     }

@@ -326,12 +326,21 @@ class LightstreamerSession:
             return None
 
         bid = _try_float(decoded.get("bid"))
+        ask = _try_float(decoded.get("ask"))
         qt = decoded.get("quotetime")
-        if bid is None:
+        if bid is None and ask is None:
             return None
 
         # Für Portfolio-Updates ist key typischerweise ISIN. Für Indizes (X...) bleibt key die Item-ID.
-        return {"type": "quote", "key": key or symbol, "isin": symbol or key, "symbol": symbol, "bid": bid, "quotetime": qt}
+        return {
+            "type": "quote",
+            "key": key or symbol,
+            "isin": symbol or key,
+            "symbol": symbol,
+            "bid": bid,
+            "ask": ask,
+            "quotetime": qt,
+        }
 
 
 def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dict]], list[str]]:
@@ -375,7 +384,7 @@ def load_watchlist(conn) -> List[Dict[str, Any]]:
     return [dict(r) for r in cur.fetchall()]
 
 
-def compute_watchlist_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
+def compute_watchlist_from_asks(asks: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
     items = load_watchlist(_conn)
     out: List[Dict[str, Any]] = []
     for it in items:
@@ -386,7 +395,7 @@ def compute_watchlist_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[s
                 "label": it.get("label"),
                 "isin": isin,
                 "key": isin,
-                "bid": bids.get(isin),
+                "ask": asks.get(isin),
             }
         )
     return out
@@ -399,8 +408,9 @@ class StreamManager:
         self._dirty = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
-        # Cache: letzte Bid je ISIN
+        # Cache: letzte Quotes je Key (ISIN oder X...)
         self.bids: Dict[str, float] = {}
+        self.asks: Dict[str, float] = {}
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -418,16 +428,20 @@ class StreamManager:
 
         # Initial snapshot (valuations + watchlist based on cached bids)
         bids = self._bids_as_optional()
+        asks = self._asks_as_optional()
         await ws.send_json(
             {
                 "type": "snapshot",
                 "valuations": compute_all_valuations_from_bids(bids),
-                "watchlist": compute_watchlist_from_bids(bids),
+                "watchlist": compute_watchlist_from_asks(asks),
             }
         )
 
     def _bids_as_optional(self) -> Dict[str, Optional[float]]:
         return {k: float(v) for k, v in self.bids.items()}
+
+    def _asks_as_optional(self) -> Dict[str, Optional[float]]:
+        return {k: float(v) for k, v in self.asks.items()}
 
     async def remove_client(self, ws: WebSocket) -> None:
         self.clients.discard(ws)
@@ -521,7 +535,10 @@ class StreamManager:
                         # update cache and broadcast quote
                         key = evt.get("key") or evt.get("isin")
                         if key:
-                            self.bids[key] = float(evt["bid"])
+                            if evt.get("bid") is not None:
+                                self.bids[key] = float(evt["bid"])
+                            if evt.get("ask") is not None:
+                                self.asks[key] = float(evt["ask"])
                         await self.broadcast(evt)
 
                 try:
@@ -531,11 +548,12 @@ class StreamManager:
 
                 # On restart, also push a fresh snapshot to align UI state.
                 bids = self._bids_as_optional()
+                asks = self._asks_as_optional()
                 await self.broadcast(
                     {
                         "type": "snapshot",
                         "valuations": compute_all_valuations_from_bids(bids),
-                        "watchlist": compute_watchlist_from_bids(bids),
+                        "watchlist": compute_watchlist_from_asks(asks),
                     }
                 )
 
@@ -814,6 +832,7 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
     # Fallback: falls Stream noch nichts gesehen hat, werden bids als None angezeigt.
     stream_manager.start()
     bids = stream_manager._bids_as_optional()
+    # asks werden separat für Watchlist im Snapshot per WS genutzt
     valued_at = now_iso()
 
     out: List[Dict[str, Any]] = []
