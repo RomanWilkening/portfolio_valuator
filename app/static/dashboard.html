@@ -45,6 +45,27 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2 style="margin-top:0;">Watchlist</h2>
+    <div class="muted">Einzelne Werte/Indizes (via ISIN) unabhängig von Portfolios mitreporten.</div>
+    <div class="row" style="margin-top: 10px;">
+      <input id="watchIsin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
+      <input id="watchLabel" placeholder="Label (optional)" style="min-width: 260px;" />
+      <button id="addWatchBtn">Hinzufügen</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>ISIN</th>
+          <th class="right">Bid</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="watchTbody"></tbody>
+    </table>
+  </div>
+
   <div id="portfolios"></div>
 
   <script>
@@ -53,16 +74,20 @@
     const streamStateEl = document.getElementById("streamState");
     const lastQuoteAtEl = document.getElementById("lastQuoteAt");
     const reconnectBtn = document.getElementById("reconnectBtn");
+    const watchIsinEl = document.getElementById("watchIsin");
+    const watchLabelEl = document.getElementById("watchLabel");
+    const addWatchBtn = document.getElementById("addWatchBtn");
+    const watchTbody = document.getElementById("watchTbody");
 
     function setStatus(level, message) {
       statusEl.className = level;
       statusEl.textContent = message;
     }
 
-    function fmtNum(n, digits=4) {
+    function fmtNum(n) {
       if (n === null || n === undefined) return "—";
       if (!isFinite(n)) return "—";
-      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function fmtPct(x) {
@@ -92,7 +117,61 @@
       portfolios: new Map(), // pid -> { positions: Map(isin -> posData), totalsEl: {...}, rowsByIsin: Map(isin -> {bidEl,mvEl,pnlEl,pnlPctEl}) }
       isinsToPortfolios: new Map(), // isin -> Set(pid)
       bids: new Map(), // isin -> bid (number)
+      watch: {
+        byId: new Map(), // id -> {isin,label}
+        rowById: new Map(), // id -> {bidEl}
+        idByIsin: new Map(), // isin -> id
+      },
     };
+
+    function renderWatchlist(items) {
+      watchTbody.innerHTML = "";
+      state.watch.byId.clear();
+      state.watch.rowById.clear();
+      state.watch.idByIsin.clear();
+
+      for (const it of (items || [])) {
+        const id = Number(it.id);
+        const isin = String(it.isin || "");
+        const label = it.label ? String(it.label) : "";
+        state.watch.byId.set(id, { isin, label });
+        state.watch.idByIsin.set(isin, id);
+
+        const tr = document.createElement("tr");
+        const tdLabel = document.createElement("td");
+        const tdIsin = document.createElement("td");
+        const tdBid = document.createElement("td");
+        const tdDel = document.createElement("td");
+        tdBid.classList.add("right");
+
+        tdLabel.textContent = label || "—";
+        tdIsin.textContent = isin;
+
+        const bid = state.bids.get(isin);
+        tdBid.textContent = (bid === undefined) ? "—" : fmtNum(bid);
+
+        const btn = document.createElement("button");
+        btn.textContent = "Entfernen";
+        btn.onclick = async () => {
+          setStatus("info", "Entferne Watchlist-Eintrag…");
+          await api(`/api/watchlist/${id}`, { method: "DELETE" });
+          // UI: remove row + mapping
+          state.watch.byId.delete(id);
+          state.watch.rowById.delete(id);
+          state.watch.idByIsin.delete(isin);
+          tr.remove();
+          setStatus("success", "Watchlist-Eintrag entfernt.");
+        };
+        tdDel.appendChild(btn);
+
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdIsin);
+        tr.appendChild(tdBid);
+        tr.appendChild(tdDel);
+        watchTbody.appendChild(tr);
+        state.watch.rowById.set(id, { bidEl: tdBid });
+      }
+    }
 
     function renderAll(valuations) {
       portfoliosEl.innerHTML = "";
@@ -119,9 +198,9 @@
         header.className = "row";
         header.innerHTML = `
           <h2 style="margin:0; flex:1 1 auto;">${pf.name} <span class="muted">(#${pf.id})</span></h2>
-          <span class="pill">Market Value: <strong data-t="mv">${fmtNum(v.totals?.market_value, 6)}</strong></span>
-          <span class="pill">Cost Basis: <strong data-t="cb">${fmtNum(v.totals?.cost_basis, 6)}</strong></span>
-          <span class="pill">PnL: <strong data-t="pnl" class="${clsPnL(v.totals?.pnl)}">${fmtNum(v.totals?.pnl, 6)}</strong></span>
+          <span class="pill">Market Value: <strong data-t="mv">${fmtNum(v.totals?.market_value)}</strong></span>
+          <span class="pill">Cost Basis: <strong data-t="cb">${fmtNum(v.totals?.cost_basis)}</strong></span>
+          <span class="pill">PnL: <strong data-t="pnl" class="${clsPnL(v.totals?.pnl)}">${fmtNum(v.totals?.pnl)}</strong></span>
           <span class="pill muted">valued_at: <strong data-t="at">${v.valued_at || "—"}</strong></span>
         `;
         card.appendChild(header);
@@ -168,12 +247,12 @@
 
           const cells = [
             isin,
-            fmtNum(p.quantity, 6),
-            fmtNum(p.entry_price, 6),
-            (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid, 6),
-            (p.market_value === null || p.market_value === undefined) ? "—" : fmtNum(p.market_value, 6),
-            fmtNum(p.cost_basis, 6),
-            (p.pnl === null || p.pnl === undefined) ? "—" : fmtNum(p.pnl, 6),
+            fmtNum(p.quantity),
+            fmtNum(p.entry_price),
+            (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid),
+            (p.market_value === null || p.market_value === undefined) ? "—" : fmtNum(p.market_value),
+            fmtNum(p.cost_basis),
+            (p.pnl === null || p.pnl === undefined) ? "—" : fmtNum(p.pnl),
             (p.pnl_pct === null || p.pnl_pct === undefined) ? "—" : fmtPct(p.pnl_pct),
           ];
 
@@ -213,9 +292,9 @@
         if (bid !== undefined) mv += bid * pos.quantity;
       }
       const pnl = mv - cb;
-      pf.totalsEl.mv.textContent = fmtNum(mv, 6);
-      pf.totalsEl.cb.textContent = fmtNum(cb, 6);
-      pf.totalsEl.pnl.textContent = fmtNum(pnl, 6);
+      pf.totalsEl.mv.textContent = fmtNum(mv);
+      pf.totalsEl.cb.textContent = fmtNum(cb);
+      pf.totalsEl.pnl.textContent = fmtNum(pnl);
       pf.totalsEl.pnl.className = clsPnL(pnl);
       pf.totalsEl.at.textContent = new Date().toISOString();
     }
@@ -223,6 +302,13 @@
     function applyQuoteUpdate(isin, bid, quotetime) {
       state.bids.set(isin, Number(bid));
       lastQuoteAtEl.textContent = (quotetime && String(quotetime).trim()) ? String(quotetime) : new Date().toLocaleTimeString();
+
+      // Watchlist update
+      const wid = state.watch.idByIsin.get(isin);
+      if (wid !== undefined) {
+        const row = state.watch.rowById.get(wid);
+        if (row) row.bidEl.textContent = fmtNum(bid);
+      }
 
       const pids = state.isinsToPortfolios.get(isin);
       if (!pids) return;
@@ -239,9 +325,9 @@
         const pnl = mv - cb;
         const pnlPct = cb ? (pnl / cb) : null;
 
-        row.bidEl.textContent = fmtNum(bid, 6);
-        row.mvEl.textContent = fmtNum(mv, 6);
-        row.pnlEl.textContent = fmtNum(pnl, 6);
+        row.bidEl.textContent = fmtNum(bid);
+        row.mvEl.textContent = fmtNum(mv);
+        row.pnlEl.textContent = fmtNum(pnl);
         row.pnlPctEl.textContent = pnlPct === null ? "—" : fmtPct(pnlPct);
 
         row.pnlEl.className = "right " + clsPnL(pnl);
@@ -281,6 +367,7 @@
 
         if (msg.type === "snapshot") {
           renderAll(msg.valuations || []);
+          renderWatchlist(msg.watchlist || []);
           return;
         }
 
@@ -295,9 +382,23 @@
       connectWs();
     };
 
+    addWatchBtn.onclick = async () => {
+      const isin = (watchIsinEl.value || "").trim().toUpperCase();
+      const label = (watchLabelEl.value || "").trim();
+      if (!isin) return;
+      setStatus("info", "Füge Watchlist-Eintrag hinzu…");
+      const it = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ isin, label: label || null }) });
+      // update UI: reload full watchlist to ensure bid mapping consistent
+      const list = await api("/api/watchlist");
+      renderWatchlist(list);
+      watchIsinEl.value = "";
+      watchLabelEl.value = "";
+      setStatus("success", "Watchlist-Eintrag hinzugefügt.");
+    };
+
     // Initial snapshot + WS connect
-    api("/api/portfolios/valuations")
-      .then(vals => { renderAll(vals); connectWs(); })
+    Promise.all([api("/api/portfolios/valuations"), api("/api/watchlist")])
+      .then(([vals, watch]) => { renderAll(vals); renderWatchlist(watch); connectWs(); })
       .catch(e => setStatus("error", String(e.message || e)));
   </script>
 </body>

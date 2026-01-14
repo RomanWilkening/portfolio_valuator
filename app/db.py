@@ -41,6 +41,13 @@ def init_db(conn: sqlite3.Connection) -> None:
           FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE,
           UNIQUE (portfolio_id, isin)
         );
+
+        CREATE TABLE IF NOT EXISTS watchlist (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          label TEXT,
+          isin TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
         """
     )
     conn.commit()

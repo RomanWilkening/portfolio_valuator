@@ -331,6 +331,27 @@ def compute_all_valuations_from_bids(bids: Dict[str, Optional[float]]) -> List[D
     return out
 
 
+def load_watchlist(conn) -> List[Dict[str, Any]]:
+    cur = conn.execute("SELECT id, label, isin FROM watchlist ORDER BY id DESC")
+    return [dict(r) for r in cur.fetchall()]
+
+
+def compute_watchlist_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
+    items = load_watchlist(_conn)
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        isin = it["isin"]
+        out.append(
+            {
+                "id": it["id"],
+                "label": it.get("label"),
+                "isin": isin,
+                "bid": bids.get(isin),
+            }
+        )
+    return out
+
+
 class StreamManager:
     def __init__(self) -> None:
         self.clients: Set[WebSocket] = set()
@@ -355,8 +376,15 @@ class StreamManager:
         # Start stream when first client arrives
         self.start()
 
-        # Initial snapshot (valuations based on cached bids)
-        await ws.send_json({"type": "snapshot", "valuations": compute_all_valuations_from_bids(self._bids_as_optional())})
+        # Initial snapshot (valuations + watchlist based on cached bids)
+        bids = self._bids_as_optional()
+        await ws.send_json(
+            {
+                "type": "snapshot",
+                "valuations": compute_all_valuations_from_bids(bids),
+                "watchlist": compute_watchlist_from_bids(bids),
+            }
+        )
 
     def _bids_as_optional(self) -> Dict[str, Optional[float]]:
         return {k: float(v) for k, v in self.bids.items()}
@@ -388,7 +416,17 @@ class StreamManager:
                     await asyncio.sleep(0.5)
                     continue
 
-                portfolios, by_portfolio, all_isins = _load_portfolios_and_positions(_conn)
+                portfolios, by_portfolio, portfolio_isins = _load_portfolios_and_positions(_conn)
+                watch = load_watchlist(_conn)
+                watch_isins = [w["isin"] for w in watch]
+
+                all_isins: List[str] = []
+                seen: set[str] = set()
+                for i in portfolio_isins + watch_isins:
+                    if i not in seen:
+                        seen.add(i)
+                        all_isins.append(i)
+
                 items = [isin_to_item(i) for i in all_isins]
 
                 if items == last_items and not self._dirty.is_set():
@@ -401,7 +439,7 @@ class StreamManager:
                 last_items = items
 
                 if not items:
-                    await self.broadcast({"type": "status", "level": "warn", "message": "Keine Positionen vorhanden – kein Stream."})
+                    await self.broadcast({"type": "status", "level": "warn", "message": "Keine Positionen/Watchlist vorhanden – kein Stream."})
                     await asyncio.sleep(1.0)
                     continue
 
@@ -444,7 +482,14 @@ class StreamManager:
                     pass
 
                 # On restart, also push a fresh snapshot to align UI state.
-                await self.broadcast({"type": "snapshot", "valuations": compute_all_valuations_from_bids(self._bids_as_optional())})
+                bids = self._bids_as_optional()
+                await self.broadcast(
+                    {
+                        "type": "snapshot",
+                        "valuations": compute_all_valuations_from_bids(bids),
+                        "watchlist": compute_watchlist_from_bids(bids),
+                    }
+                )
 
             except asyncio.CancelledError:
                 break
@@ -596,6 +641,11 @@ class PositionOut(BaseModel):
     entry_price: float
 
 
+class WatchItemCreate(BaseModel):
+    isin: str
+    label: Optional[str] = Field(default=None, max_length=200)
+
+
 # ----------------- FastAPI App -----------------
 
 
@@ -651,6 +701,33 @@ async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
     _conn.commit()
     stream_manager.mark_dirty()
     return PortfolioOut(id=int(cur.lastrowid), name=body.name.strip())
+
+
+@app.get("/api/watchlist")
+async def list_watchlist() -> List[Dict[str, Any]]:
+    return load_watchlist(_conn)
+
+
+@app.post("/api/watchlist", status_code=201)
+async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
+    isin = validate_isin(body.isin)
+    label = (body.label or "").strip() or None
+    try:
+        cur = _conn.execute("INSERT INTO watchlist(isin, label) VALUES (?,?)", (isin, label))
+        _conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Watchlist-Eintrag konnte nicht gespeichert werden: {e}")
+
+    stream_manager.mark_dirty()
+    return {"id": int(cur.lastrowid), "isin": isin, "label": label}
+
+
+@app.delete("/api/watchlist/{item_id}", status_code=204)
+async def delete_watchlist_item(item_id: int) -> None:
+    with _conn:
+        _conn.execute("DELETE FROM watchlist WHERE id=?", (item_id,))
+    stream_manager.mark_dirty()
+    return None
 
 
 @app.get("/api/portfolios/valuations")
@@ -738,6 +815,26 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
 
     stream_manager.mark_dirty()
     return await get_portfolio(portfolio_id)
+
+
+@app.delete("/api/portfolios/{portfolio_id}", status_code=204)
+async def delete_portfolio(portfolio_id: int) -> None:
+    cur = _conn.execute("DELETE FROM portfolios WHERE id=?", (portfolio_id,))
+    _conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+    stream_manager.mark_dirty()
+    return None
+
+
+@app.delete("/api/portfolios/{portfolio_id}/positions/{position_id}", status_code=204)
+async def delete_position(portfolio_id: int, position_id: int) -> None:
+    cur = _conn.execute("DELETE FROM positions WHERE id=? AND portfolio_id=?", (position_id, portfolio_id))
+    _conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Position nicht gefunden")
+    stream_manager.mark_dirty()
+    return None
 
 
 @app.post("/api/portfolios/{portfolio_id}/value")
