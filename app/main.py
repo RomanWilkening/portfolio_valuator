@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from websockets.exceptions import ConnectionClosed
 
 from app.db import connect_db, init_db
+from app.mqtt_ha import HomeAssistantMqttPublisher, build_entity_payload, load_mqtt_settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("portfolio-valuator")
@@ -572,6 +573,7 @@ class StreamManager:
                                 self.watch_prices[key] = float(evt["watch_price"])
                                 self.watch_fields[key] = str(evt["watch_field"])
                         await self.broadcast(evt)
+                        _publish_mqtt_snapshot()
 
                 try:
                     await sess.close()
@@ -598,6 +600,29 @@ class StreamManager:
 
 
 stream_manager = StreamManager()
+_mqtt: Optional[HomeAssistantMqttPublisher] = None
+
+
+def _publish_mqtt_snapshot() -> None:
+    """
+    Publishes the full payload (portfolios/positions/watchlist) to a single HA entity.
+    Best-effort + debounced inside publisher.
+    """
+    global _mqtt
+    if not _mqtt:
+        return
+    bids = stream_manager._bids_as_optional()
+    watch_prices = stream_manager._watch_prices_as_optional()
+
+    portfolios = compute_all_valuations_from_bids(bids)
+    watchlist = compute_watchlist_from_prices(watch_prices, stream_manager.watch_fields)
+
+    state_value, attrs = build_entity_payload(
+        portfolios=portfolios,
+        watchlist=watchlist,
+        meta={"source": "stream_cache"},
+    )
+    _mqtt.publish_now(state_value, attrs)
 
 
 async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Optional[float]]:
@@ -757,6 +782,16 @@ init_db(_conn)
 async def _startup() -> None:
     # Stream startet erst, wenn ein Dashboard-Client verbunden ist.
     stream_manager.start()
+    global _mqtt
+    try:
+        s = load_mqtt_settings()
+        if s.enabled:
+            _mqtt = HomeAssistantMqttPublisher(s)
+            _mqtt.connect()
+            # initial publish
+            _publish_mqtt_snapshot()
+    except Exception as e:
+        logger.warning("MQTT disabled/unavailable: %s", e)
 
 
 @app.on_event("shutdown")
@@ -767,6 +802,12 @@ async def _shutdown() -> None:
             await stream_manager._task
         except Exception:
             pass
+    global _mqtt
+    try:
+        if _mqtt:
+            _mqtt.close()
+    finally:
+        _mqtt = None
 
 
 @app.get("/")
@@ -798,6 +839,7 @@ async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
     cur = _conn.execute("INSERT INTO portfolios(name) VALUES (?)", (body.name.strip(),))
     _conn.commit()
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return PortfolioOut(id=int(cur.lastrowid), name=body.name.strip())
 
 
@@ -817,6 +859,7 @@ async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Watchlist-Eintrag konnte nicht gespeichert werden: {e}")
 
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return {"id": int(cur.lastrowid), "isin": isin, "label": label}
 
 
@@ -825,6 +868,7 @@ async def delete_watchlist_item(item_id: int) -> None:
     with _conn:
         _conn.execute("DELETE FROM watchlist WHERE id=?", (item_id,))
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return None
 
 
@@ -913,6 +957,7 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
             )
 
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return await get_portfolio(portfolio_id)
 
 
@@ -923,6 +968,7 @@ async def delete_portfolio(portfolio_id: int) -> None:
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return None
 
 
@@ -933,6 +979,7 @@ async def delete_position(portfolio_id: int, position_id: int) -> None:
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Position nicht gefunden")
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return None
 
 
