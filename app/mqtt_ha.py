@@ -5,7 +5,8 @@ import re
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional, Set
+from math import isfinite
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import paho.mqtt.client as mqtt
 
@@ -17,6 +18,16 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if v == "":
         return default
     return v in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    v = (os.getenv(name) or "").strip()
+    if v == "":
+        return default
+    try:
+        return float(v)
+    except Exception:
+        return default
 
 
 def _slug(s: str) -> str:
@@ -40,6 +51,10 @@ class MqttSettings:
     qos: int
     retain: bool
     debounce_ms: int
+    # Plausibility / Sanity checks (to avoid "0 spikes" etc. in HA history)
+    sanity_skip_zero_price: bool
+    sanity_max_pct_change: float
+    sanity_require_price_for_valuation: bool
 
     @property
     def availability_topic(self) -> str:
@@ -64,6 +79,12 @@ def load_mqtt_settings() -> MqttSettings:
         retain=_env_bool("MQTT_RETAIN", default=True),
         # Default 0 => publish every push (no debounce)
         debounce_ms=int(os.getenv("MQTT_DEBOUNCE_MS", "0")),
+        # Sanity checks
+        sanity_skip_zero_price=_env_bool("MQTT_SANITY_SKIP_ZERO_PRICE", default=True),
+        # 0 disables jump filtering. Otherwise: max % change per update before skipping the update.
+        sanity_max_pct_change=_env_float("MQTT_SANITY_MAX_PCT_CHANGE", default=0.0),
+        # If true: don't publish portfolio/position valuation sensors when no price is available.
+        sanity_require_price_for_valuation=_env_bool("MQTT_SANITY_REQUIRE_PRICE_FOR_VALUATION", default=True),
     )
 
 
@@ -85,6 +106,8 @@ class HomeAssistantMqttPublisher:
         self._known_objects: Set[str] = set()
         # Cache discovery payloads so we can republish them after reconnects.
         self._discovery_cache: Dict[str, Dict[str, Any]] = {}
+        # Last published state per sensor (for plausibility checks).
+        self._last_state: Dict[str, float] = {}
 
     def connect(self) -> None:
         if not self.s.host:
@@ -218,6 +241,51 @@ class HomeAssistantMqttPublisher:
             retain=self.s.retain,
         )
 
+    def _coerce_number(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            v = float(value)
+            return v if isfinite(v) else None
+        try:
+            v = float(str(value))
+            return v if isfinite(v) else None
+        except Exception:
+            return None
+
+    def _should_publish(self, *, oid: str, value: Any, kind: str) -> Tuple[bool, Optional[float]]:
+        """
+        Returns (publish?, coerced_value).
+
+        kind:
+        - price: skip 0.0 (configurable) and apply jump filter (optional)
+        - value: apply jump filter (optional)
+        - other: no special checks besides numeric coercion
+        """
+        v = self._coerce_number(value)
+        if v is None:
+            return False, None
+
+        if kind == "price" and self.s.sanity_skip_zero_price and v == 0.0:
+            return False, v
+
+        max_pct = float(self.s.sanity_max_pct_change or 0.0)
+        if max_pct > 0.0:
+            prev = self._last_state.get(oid)
+            if prev is not None:
+                # percent change relative to previous value; handle prev==0 separately
+                if prev == 0.0:
+                    pct = abs(v - prev) * 100.0
+                else:
+                    pct = abs((v - prev) / prev) * 100.0
+                if pct > max_pct:
+                    logger.warning("MQTT sanity: skip %s update (%.6g -> %.6g, %.1f%% > %.1f%%)", oid, prev, v, pct, max_pct)
+                    return False, v
+
+        return True, v
+
     def _debounced(self) -> bool:
         now = time.time()
         min_dt = self.s.debounce_ms / 1000.0
@@ -241,6 +309,8 @@ class HomeAssistantMqttPublisher:
             unit: Optional[str],
             device_class: Optional[str],
             attrs: Dict[str, Any],
+            *,
+            kind: str = "other",
         ) -> None:
             oid = _slug(object_id)
             desired.add(oid)
@@ -253,7 +323,12 @@ class HomeAssistantMqttPublisher:
                     state_class=None,
                     extra_attrs=attrs,
                 )
-            self._publish_state(oid, value, attrs)
+            ok, coerced = self._should_publish(oid=oid, value=value, kind=kind)
+            if not ok:
+                return
+            assert coerced is not None
+            self._publish_state(oid, coerced, attrs)
+            self._last_state[oid] = float(coerced)
 
         # Portfolios + Positionen
         for pf in portfolios:
@@ -271,19 +346,49 @@ class HomeAssistantMqttPublisher:
 
             pf_name = (pfo.get("name") or str(pid)).strip()
             base = f"portfolio_{pid}"
-            add_sensor(f"{base}_wert", f"{pf_name} Wert", round(float(mv or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency})
-            add_sensor(f"{base}_basis", f"{pf_name} Basis", round(float(cb or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency})
-            add_sensor(f"{base}_performance", f"{pf_name} Performance", round(float(pnl or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency})
+            positions = (pf or {}).get("positions") or []
+            missing_price = any((pos.get("bid") is None) for pos in positions)
+
+            # Basis ist immer stabil (Entry*Qty). Wert/Performance nur, wenn Kursdaten vorhanden sind.
+            add_sensor(
+                f"{base}_basis",
+                f"{pf_name} Basis",
+                round(float(cb or 0.0), 2),
+                currency,
+                "monetary",
+                {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency},
+                kind="value",
+            )
+            if (not self.s.sanity_require_price_for_valuation) or (not missing_price):
+                add_sensor(
+                    f"{base}_wert",
+                    f"{pf_name} Wert",
+                    None if mv is None else round(float(mv), 2),
+                    currency,
+                    "monetary",
+                    {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency},
+                    kind="value",
+                )
+                add_sensor(
+                    f"{base}_performance",
+                    f"{pf_name} Performance",
+                    None if pnl is None else round(float(pnl), 2),
+                    currency,
+                    "monetary",
+                    {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency},
+                    kind="value",
+                )
             add_sensor(
                 f"{base}_performance_pct",
                 f"{pf_name} Performance%",
-                round(float((pnl_pct or 0.0) * 100.0), 2),
+                None if pnl_pct is None else round(float(pnl_pct) * 100.0, 2),
                 "%",
                 None,
                 {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency},
+                kind="other",
             )
 
-            for pos in (pf or {}).get("positions") or []:
+            for pos in positions:
                 pos_id = pos.get("id")
                 if pos_id is None:
                     continue
@@ -299,18 +404,60 @@ class HomeAssistantMqttPublisher:
                 isin_s = (isin or str(pos_id) or "").strip()
                 # object_id muss eindeutig sein, daher Portfolio-ID anhängen (gleiche ISIN kann in mehreren Portfolios vorkommen)
                 pbase = f"{isin_s}_p{pid}"
-                add_sensor(f"{pbase}_stueck", f"{isin_s} Stück", round(float(qty or 0.0), 2), "stk", None, {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_kurs", f"{isin_s} Kurs", round(float(bid or 0.0), 4), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_basis", f"{isin_s} Basis", round(float(cost_basis or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_wert", f"{isin_s} Wert", round(float(market_value or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_performance", f"{isin_s} Performance", round(float(p_pnl or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(
+                    f"{pbase}_stueck",
+                    f"{isin_s} Stück",
+                    round(float(qty or 0.0), 2),
+                    "stk",
+                    None,
+                    {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},
+                    kind="other",
+                )
+                add_sensor(
+                    f"{pbase}_basis",
+                    f"{isin_s} Basis",
+                    round(float(cost_basis or 0.0), 2),
+                    pos_currency,
+                    "monetary",
+                    {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},
+                    kind="value",
+                )
+                if (not self.s.sanity_require_price_for_valuation) or (bid is not None):
+                    add_sensor(
+                        f"{pbase}_kurs",
+                        f"{isin_s} Kurs",
+                        None if bid is None else round(float(bid), 4),
+                        pos_currency,
+                        "monetary",
+                        {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},
+                        kind="price",
+                    )
+                    add_sensor(
+                        f"{pbase}_wert",
+                        f"{isin_s} Wert",
+                        None if market_value is None else round(float(market_value), 2),
+                        pos_currency,
+                        "monetary",
+                        {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},
+                        kind="value",
+                    )
+                    add_sensor(
+                        f"{pbase}_performance",
+                        f"{isin_s} Performance",
+                        None if p_pnl is None else round(float(p_pnl), 2),
+                        pos_currency,
+                        "monetary",
+                        {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},
+                        kind="value",
+                    )
                 add_sensor(
                     f"{pbase}_performance_pct",
                     f"{isin_s} Performance%",
-                    round(float((p_pnl_pct or 0.0) * 100.0), 2),
+                    None if p_pnl_pct is None else round(float(p_pnl_pct) * 100.0, 2),
                     "%",
                     None,
                     {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency},
+                    kind="other",
                 )
 
         # Watchlist
@@ -329,15 +476,18 @@ class HomeAssistantMqttPublisher:
             add_sensor(
                 f"watch_{key_s}_kurs",
                 name,
-                round(float(price or 0.0), 4),
+                None if price is None else round(float(price), 4),
                 currency,
                 "monetary",
                 {"id": wid, "type": "watchlist", "key": key, "label": label, "field": field},
+                kind="price",
             )
 
         # Cleanup removed sensors (remove discovery)
         removed = self._known_objects - desired
         for oid in removed:
             self.client.publish(self._discovery_topic(oid), payload="", qos=self.s.qos, retain=True)
+            self._discovery_cache.pop(oid, None)
+            self._last_state.pop(oid, None)
         self._known_objects = desired
 
