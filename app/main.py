@@ -3,11 +3,11 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote
 
 import websockets
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -263,6 +263,199 @@ class LightstreamerSession:
                 out.append(line)
         return out
 
+    def handle_update_line(self, line: str, idx_to_isin: Dict[int, str]) -> Optional[Dict[str, Any]]:
+        """
+        Parst U-Updates und liefert ein Event-Dict zurück:
+        {type:'quote', isin, bid, quotetime}
+        """
+        if not line.startswith("U,"):
+            return None
+
+        m = re.match(r"^U,(\d+),(\d+),(.*)$", line)
+        if not m:
+            return None
+
+        item_index = int(m.group(2))
+        values_str = m.group(3)
+        tokens = values_str.split("|")
+
+        prev = self.item_state.get(item_index, {f: None for f in SCHEMA_FIELDS})
+        decoded = decode_field_values(tokens, SCHEMA_FIELDS, prev)
+        self.item_state[item_index] = decoded
+
+        isin = decoded.get("symbol") or idx_to_isin.get(item_index)
+        if not isin:
+            return None
+
+        bid = _try_float(decoded.get("bid"))
+        qt = decoded.get("quotetime")
+        if bid is None:
+            return None
+
+        return {"type": "quote", "isin": isin, "bid": bid, "quotetime": qt}
+
+
+def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dict]], list[str]]:
+    cur = conn.execute("SELECT id, name FROM portfolios ORDER BY id DESC")
+    portfolios = [dict(r) for r in cur.fetchall()]
+    cur2 = conn.execute(
+        """
+        SELECT id, portfolio_id, isin, quantity, entry_price
+        FROM positions
+        ORDER BY portfolio_id DESC, id ASC
+        """
+    )
+    positions_all = [dict(r) for r in cur2.fetchall()]
+
+    by_portfolio: Dict[int, List[Dict[str, Any]]] = {}
+    all_isins: List[str] = []
+    seen: set[str] = set()
+    for p in positions_all:
+        pid = int(p["portfolio_id"])
+        by_portfolio.setdefault(pid, []).append(p)
+        isin = p["isin"]
+        if isin not in seen:
+            seen.add(isin)
+            all_isins.append(isin)
+
+    return portfolios, by_portfolio, all_isins
+
+
+def compute_all_valuations_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
+    portfolios, by_portfolio, _ = _load_portfolios_and_positions(_conn)
+    valued_at = now_iso()
+    out: List[Dict[str, Any]] = []
+    for pf in portfolios:
+        pid = int(pf["id"])
+        out.append(compute_valuation(pf, by_portfolio.get(pid, []), bids, valued_at=valued_at, timeout_s=0.0))
+    return out
+
+
+class StreamManager:
+    def __init__(self) -> None:
+        self.clients: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+        self._dirty = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+        # Cache: letzte Bid je ISIN
+        self.bids: Dict[str, float] = {}
+
+    def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run())
+
+    def mark_dirty(self) -> None:
+        self._dirty.set()
+
+    async def add_client(self, ws: WebSocket) -> None:
+        self.clients.add(ws)
+
+        # Start stream when first client arrives
+        self.start()
+
+        # Initial snapshot (valuations based on cached bids)
+        await ws.send_json({"type": "snapshot", "valuations": compute_all_valuations_from_bids(self._bids_as_optional())})
+
+    def _bids_as_optional(self) -> Dict[str, Optional[float]]:
+        return {k: float(v) for k, v in self.bids.items()}
+
+    async def remove_client(self, ws: WebSocket) -> None:
+        self.clients.discard(ws)
+
+    async def broadcast(self, obj: Dict[str, Any]) -> None:
+        dead: List[WebSocket] = []
+        for ws in list(self.clients):
+            try:
+                await ws.send_json(obj)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.clients.discard(ws)
+
+    async def _run(self) -> None:
+        """
+        Background task: subscribes to all current ISINs, emits quote events.
+        Restarts subscription when portfolios/positions change (dirty flag).
+        """
+        last_items: List[str] = []
+
+        while True:
+            try:
+                # Wait for at least one client to avoid unnecessary streaming
+                if not self.clients:
+                    await asyncio.sleep(0.5)
+                    continue
+
+                portfolios, by_portfolio, all_isins = _load_portfolios_and_positions(_conn)
+                items = [isin_to_item(i) for i in all_isins]
+
+                if items == last_items and not self._dirty.is_set():
+                    # keep current session
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # reset dirty
+                self._dirty.clear()
+                last_items = items
+
+                if not items:
+                    await self.broadcast({"type": "status", "level": "warn", "message": "Keine Positionen vorhanden – kein Stream."})
+                    await asyncio.sleep(1.0)
+                    continue
+
+                await self.broadcast({"type": "status", "level": "info", "message": f"Starte Stream für {len(all_isins)} ISIN(s)…"})
+
+                sess = LightstreamerSession()
+                idx_to_isin = {idx + 1: isin for idx, isin in enumerate(all_isins)}
+
+                await sess.connect()
+                await sess.subscribe_items(items)
+                await self.broadcast({"type": "status", "level": "success", "message": "Stream verbunden."})
+
+                # Receive loop until dirty flag set -> restart
+                while not self._dirty.is_set():
+                    try:
+                        raw = await sess._recv_text()
+                    except ConnectionClosed as e:
+                        await self.broadcast({"type": "status", "level": "error", "message": f"Stream getrennt: {e.code} {e.reason}"})
+                        break
+
+                    for line in sess._split_lines(raw):
+                        if line == "PROBE":
+                            continue
+                        if line.startswith("REQERR,") or line.startswith("ERROR,") or line.startswith("CONERR,"):
+                            await self.broadcast({"type": "status", "level": "error", "message": f"Lightstreamer: {line}"})
+                            continue
+
+                        evt = sess.handle_update_line(line, idx_to_isin)
+                        if not evt:
+                            continue
+
+                        # update cache and broadcast quote
+                        isin = evt["isin"]
+                        self.bids[isin] = float(evt["bid"])
+                        await self.broadcast(evt)
+
+                try:
+                    await sess.close()
+                except Exception:
+                    pass
+
+                # On restart, also push a fresh snapshot to align UI state.
+                await self.broadcast({"type": "snapshot", "valuations": compute_all_valuations_from_bids(self._bids_as_optional())})
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception("StreamManager error")
+                await self.broadcast({"type": "status", "level": "error", "message": f"StreamManager Fehler: {e}"})
+                await asyncio.sleep(2.0)
+
+
+stream_manager = StreamManager()
+
 
 async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Optional[float]]:
     """
@@ -412,6 +605,21 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 _conn = connect_db()
 init_db(_conn)
 
+@app.on_event("startup")
+async def _startup() -> None:
+    # Stream startet erst, wenn ein Dashboard-Client verbunden ist.
+    stream_manager.start()
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    if stream_manager._task and not stream_manager._task.done():
+        stream_manager._task.cancel()
+        try:
+            await stream_manager._task
+        except Exception:
+            pass
+
 
 @app.get("/")
 async def index():
@@ -441,6 +649,7 @@ async def list_portfolios() -> List[Dict[str, Any]]:
 async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
     cur = _conn.execute("INSERT INTO portfolios(name) VALUES (?)", (body.name.strip(),))
     _conn.commit()
+    stream_manager.mark_dirty()
     return PortfolioOut(id=int(cur.lastrowid), name=body.name.strip())
 
 
@@ -476,22 +685,16 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
             seen.add(isin)
             all_isins.append(isin)
 
+    # Für Dashboard: Snapshot aus dem aktuellen Bid-Cache (Stream).
+    # Fallback: falls Stream noch nichts gesehen hat, werden bids als None angezeigt.
+    stream_manager.start()
+    bids = stream_manager._bids_as_optional()
     valued_at = now_iso()
-    timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
-    bids = await fetch_bids(all_isins, timeout_s=timeout_s) if all_isins else {}
 
     out: List[Dict[str, Any]] = []
     for pf in portfolios:
         pid = int(pf["id"])
-        out.append(
-            compute_valuation(
-                pf,
-                by_portfolio.get(pid, []),
-                bids,
-                valued_at=valued_at,
-                timeout_s=timeout_s,
-            )
-        )
+        out.append(compute_valuation(pf, by_portfolio.get(pid, []), bids, valued_at=valued_at, timeout_s=0.0))
     return out
 
 
@@ -533,6 +736,7 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
                 (portfolio_id, p.isin, p.quantity, p.entry_price),
             )
 
+    stream_manager.mark_dirty()
     return await get_portfolio(portfolio_id)
 
 
@@ -553,6 +757,21 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
         return compute_valuation(dict(portfolio), [], {}, valued_at=valued_at, timeout_s=0.0)
 
     isins = [p["isin"] for p in positions]
-    timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
-    bids = await fetch_bids(isins, timeout_s=timeout_s)
-    return compute_valuation(dict(portfolio), positions, bids, valued_at=valued_at, timeout_s=timeout_s)
+    # Einzelbewertung nutzt ebenfalls den Cache (keine eigene LS-Session), damit Streaming „single source of truth“ ist.
+    stream_manager.start()
+    bids = stream_manager._bids_as_optional()
+    return compute_valuation(dict(portfolio), positions, bids, valued_at=valued_at, timeout_s=0.0)
+
+
+@app.websocket("/ws")
+async def ws_dashboard(ws: WebSocket):
+    await ws.accept()
+    await stream_manager.add_client(ws)
+    try:
+        while True:
+            # Dashboard sendet aktuell keine Commands; wir halten die Verbindung offen.
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await stream_manager.remove_client(ws)
