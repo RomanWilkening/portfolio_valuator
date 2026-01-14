@@ -10,6 +10,7 @@ import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from websockets.exceptions import ConnectionClosed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bnpp-ls-mvp")
@@ -136,7 +137,7 @@ async def _ws_connect() -> Any:
     """
     # Häufige Ursache für HTTP 400: Server akzeptiert Subprotocol/Origin nicht.
     # Wir probieren daher ein paar sinnvolle Kombinationen.
-    subprotocol_candidates: List[str] = []
+    subprotocol_candidates: List[Optional[str]] = []
     for p in [
         LS_SUBPROTOCOL,
         os.getenv("LS_SUBPROTOCOL_FALLBACK_1", "TLCP-2.4.0.lightstreamer.com"),
@@ -145,6 +146,9 @@ async def _ws_connect() -> Any:
         p = (p or "").strip()
         if p and p not in subprotocol_candidates:
             subprotocol_candidates.append(p)
+
+    # Als letzte Option: ohne Subprotocol-Header verbinden (manche Setups sind strikt).
+    subprotocol_candidates.append(None)
 
     origin_candidates: List[Optional[str]] = []
     if LS_ORIGIN not in origin_candidates:
@@ -158,9 +162,13 @@ async def _ws_connect() -> Any:
         for origin in origin_candidates:
             for send_ua in (True, False):
                 kwargs: Dict[str, Any] = {
-                    "subprotocols": [proto],
                     "ping_interval": None,  # Lightstreamer nutzt eigene PROBE
+                    # Lightstreamer-WS kann empfindlich auf Extensions reagieren.
+                    # PerMessage-Deflate deaktivieren hilft oft bei kryptischen 1011-Abbrüchen.
+                    "compression": None,
                 }
+                if proto is not None:
+                    kwargs["subprotocols"] = [proto]
                 if origin is not None:
                     kwargs["origin"] = origin
 
@@ -177,7 +185,7 @@ async def _ws_connect() -> Any:
                     )
                     logger.info(
                         "WS connected (proto=%s, origin=%s, ua=%s)",
-                        proto,
+                        proto or "<none>",
                         origin or "<none>",
                         "on" if send_ua else "off",
                     )
@@ -192,7 +200,7 @@ async def _ws_connect() -> Any:
                         )
                         logger.info(
                             "WS connected (proto=%s, origin=%s, ua=%s) [extra_headers]",
-                            proto,
+                            proto or "<none>",
                             origin or "<none>",
                             "on" if send_ua else "off",
                         )
@@ -201,7 +209,7 @@ async def _ws_connect() -> Any:
                         last_exc = e
                         logger.warning(
                             "WS connect failed (proto=%s, origin=%s, ua=%s): %s",
-                            proto,
+                            proto or "<none>",
                             origin or "<none>",
                             "on" if send_ua else "off",
                             e,
@@ -210,7 +218,7 @@ async def _ws_connect() -> Any:
                     last_exc = e
                     logger.warning(
                         "WS connect failed (proto=%s, origin=%s, ua=%s): %s",
-                        proto,
+                        proto or "<none>",
                         origin or "<none>",
                         "on" if send_ua else "off",
                         e,
@@ -247,7 +255,8 @@ class LightstreamerSession:
             f"&LS_cause=api"
             f"&LS_password="
         )
-        msg = "create_session\n" + create_params + "\n"
+        # Lightstreamer TLCP ist zeilenbasiert; CRLF ist am kompatibelsten.
+        msg = "create_session\r\n" + create_params + "\r\n"
         await self.websocket.send(msg)
         logger.info("Sent create_session")
 
@@ -255,6 +264,9 @@ class LightstreamerSession:
         while True:
             raw = await self._recv_text()
             for line in self._split_lines(raw):
+                # Explizite Fehler- und Warnpfade
+                if line.startswith("CONERR,") or line.startswith("ERROR,"):
+                    raise RuntimeError(f"Lightstreamer create_session failed: {line}")
                 if line.startswith("CONOK,"):
                     # Format: CONOK,<sessionId>,...
                     parts = line.split(",")
@@ -289,9 +301,10 @@ class LightstreamerSession:
             f"&LS_session={quote(self.session_id)}"
         )
 
-        msg = "control\n" + params + "\n"
+        msg = "control\r\n" + params + "\r\n"
         await self.websocket.send(msg)
         logger.info("Subscribed to %s (item=%s)", self.current_isin, self.current_item)
+        self.req_id += 1
 
     async def close(self) -> None:
         if self.websocket:
@@ -419,8 +432,17 @@ async def run_ls_stream(isin: str) -> None:
         ls_session = sess
 
         while True:
-            raw = await sess._recv_text()
+            try:
+                raw = await sess._recv_text()
+            except ConnectionClosed as e:
+                # websockets liefert Close-Code/Reason – das ist die wichtigste Info beim Debuggen.
+                raise RuntimeError(f"WS closed: code={e.code} reason={e.reason}") from e
+
             for line in sess._split_lines(raw):
+                # Wenn Lightstreamer einen Request ablehnt, sehen wir das hier.
+                if line.startswith("REQERR,") or line.startswith("ERROR,"):
+                    raise RuntimeError(f"Lightstreamer error: {line}")
+
                 evt = sess.handle_line(line)
                 if evt:
                     await broadcast(evt)
@@ -448,6 +470,8 @@ async def start_stream(isin: str) -> None:
             ls_task.cancel()
             try:
                 await ls_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
 
