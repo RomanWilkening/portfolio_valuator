@@ -817,6 +817,26 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
     return await get_portfolio(portfolio_id)
 
 
+@app.delete("/api/portfolios/{portfolio_id}", status_code=204)
+async def delete_portfolio(portfolio_id: int) -> None:
+    cur = _conn.execute("DELETE FROM portfolios WHERE id=?", (portfolio_id,))
+    _conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+    stream_manager.mark_dirty()
+    return None
+
+
+@app.delete("/api/portfolios/{portfolio_id}/positions/{position_id}", status_code=204)
+async def delete_position(portfolio_id: int, position_id: int) -> None:
+    cur = _conn.execute("DELETE FROM positions WHERE id=? AND portfolio_id=?", (position_id, portfolio_id))
+    _conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Position nicht gefunden")
+    stream_manager.mark_dirty()
+    return None
+
+
 @app.post("/api/portfolios/{portfolio_id}/value")
 async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
     cur = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,))

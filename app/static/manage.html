@@ -42,6 +42,7 @@
     <div class="row">
       <select id="portfolioSelect" style="min-width: 320px;"></select>
       <button id="reloadBtn">Neu laden</button>
+      <button id="deletePortfolioBtn">Portfolio löschen</button>
     </div>
     <div class="row" style="margin-top: 10px;">
       <input id="newPortfolioName" placeholder="Neues Portfolio (Name)" style="min-width: 320px;" />
@@ -66,6 +67,7 @@
           <th>ISIN</th>
           <th class="right">Quantity</th>
           <th class="right">Entry</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
@@ -78,6 +80,7 @@
 
     const portfolioSelect = document.getElementById("portfolioSelect");
     const reloadBtn = document.getElementById("reloadBtn");
+    const deletePortfolioBtn = document.getElementById("deletePortfolioBtn");
     const newPortfolioName = document.getElementById("newPortfolioName");
     const createPortfolioBtn = document.getElementById("createPortfolioBtn");
 
@@ -115,17 +118,26 @@
       tbody.innerHTML = "";
       for (const p of currentPositions) {
         const tr = document.createElement("tr");
-        const tds = [
-          p.isin,
-          fmtNum(p.quantity),
-          fmtNum(p.entry_price),
-        ];
+        const tds = [p.isin, fmtNum(p.quantity), fmtNum(p.entry_price)];
         tds.forEach((val, i) => {
           const td = document.createElement("td");
           td.textContent = val;
           if (i >= 1) td.classList.add("right");
           tr.appendChild(td);
         });
+
+        const tdDel = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.textContent = "Entfernen";
+        btn.onclick = async () => {
+          if (!currentPortfolio) return;
+          setStatus("info", "Lösche Position…");
+          await api(`/api/portfolios/${currentPortfolio.id}/positions/${p.id}`, { method: "DELETE" });
+          await loadPortfolio(String(currentPortfolio.id));
+          setStatus("success", "Position gelöscht.");
+        };
+        tdDel.appendChild(btn);
+        tr.appendChild(tdDel);
         tbody.appendChild(tr);
       }
     }
@@ -179,6 +191,18 @@
       setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id})`);
     }
 
+    async function deletePortfolio() {
+      if (!currentPortfolio) return;
+      const ok = confirm(`Portfolio wirklich löschen?\\n\\n${currentPortfolio.name} (#${currentPortfolio.id})`);
+      if (!ok) return;
+      setStatus("info", "Lösche Portfolio…");
+      await api(`/api/portfolios/${currentPortfolio.id}`, { method: "DELETE" });
+      currentPortfolio = null;
+      currentPositions = [];
+      await loadPortfolios();
+      setStatus("success", "Portfolio gelöscht.");
+    }
+
     async function savePosition() {
       if (!currentPortfolio) return;
       const isin = (isinEl.value || "").trim().toUpperCase();
@@ -207,6 +231,7 @@
 
     reloadBtn.onclick = () => loadPortfolios(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
     createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
+    deletePortfolioBtn.onclick = () => deletePortfolio().catch(e => setStatus("error", String(e.message || e)));
     portfolioSelect.onchange = () => loadPortfolio(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
     addPosBtn.onclick = () => savePosition().catch(e => setStatus("error", String(e.message || e)));
 
