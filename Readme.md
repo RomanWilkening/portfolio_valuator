@@ -65,4 +65,4 @@ Wenn `MQTT_HOST` gesetzt ist, kannst du MQTT im Webinterface (Portfolio-Pflege) 
 Wichtige ENV-Variablen (siehe `config/app.env.example`):
 - `MQTT_HOST`, `MQTT_PORT`, optional `MQTT_USERNAME`, `MQTT_PASSWORD`
 - `MQTT_NODE_ID`, `MQTT_BASE_TOPIC`
-- `MQTT_DEBOUNCE_MS` (Default 1000ms)
+- `MQTT_DEBOUNCE_MS` (Default 0ms = jeder Push)
