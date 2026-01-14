@@ -16,6 +16,10 @@ Danach im Browser öffnen: `http://localhost:8000/`
 - Dashboard (Auto-Bewertung): `http://localhost:8000/`
 - Portfolio-Pflege (ohne Auto-Refresh): `http://localhost:8000/manage`
 
+### Watchlist (Dashboard)
+
+Im Dashboard kannst du zusätzlich zu Portfolios eine **Watchlist** pflegen (ISIN + optionales Label). Diese Werte werden über den gleichen Lightstreamer-Stream live aktualisiert.
+
 ### Persistenz (SQLite)
 
 - Default DB-Pfad: `data/app.db`
