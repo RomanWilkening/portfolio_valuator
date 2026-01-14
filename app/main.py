@@ -1,22 +1,25 @@
 import asyncio
-import json
 import logging
+import os
 import re
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Any
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from websockets.exceptions import ConnectionClosed
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("bnpp-ls-mvp")
+from app.db import connect_db, init_db
 
-# --- Lightstreamer / BNP Settings (konfigurierbar via ENV) ---
-import os
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("portfolio-valuator")
+
+
+# ----------------- Konfiguration (ENV) -----------------
 
 LS_WSS_URL = os.getenv("LS_WSS_URL", "wss://push.bnpparibas.com/lightstreamer")
 LS_SUBPROTOCOL = os.getenv("LS_SUBPROTOCOL", "TLCP-2.5.0.lightstreamer.com")
@@ -24,69 +27,59 @@ LS_SUBPROTOCOL = os.getenv("LS_SUBPROTOCOL", "TLCP-2.5.0.lightstreamer.com")
 LS_ADAPTER_SET = os.getenv("LS_ADAPTER_SET", "SmarthouseFeed")
 LS_DATA_ADAPTER = os.getenv("LS_DATA_ADAPTER", "MDS5")
 
-# "Browser-ähnliche" Defaults, kann angepasst werden.
+# "Browser-ähnlicher" Client ID (BNP/Lightstreamer kann hier lizenz-/client-typ-spezifisch sein)
 LS_CID = os.getenv(
     "LS_CID",
     "pcYgxn8m8 feOojyA1V661f3g2.pz482h95IL5h",
 )
 
-# Origin ist wichtig (Server kann Origin prüfen).
-# Wenn du den Origin-Header testweise deaktivieren willst: LS_ORIGIN="" setzen.
+# Item-Namensschema (Default: X0000010800<ISIN>)
+LS_ITEM_TEMPLATE = os.getenv("LS_ITEM_TEMPLATE", "X0000010800{isin}")
+
+# Origin ist wichtig (Server kann Origin prüfen). Zum Deaktivieren: LS_ORIGIN=""
 LS_ORIGIN = os.getenv("LS_ORIGIN", "https://derivate.bnpparibas.com") or None
 
-# User-Agent nur kosmetisch/optional
 LS_USER_AGENT = os.getenv(
     "LS_USER_AGENT",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 )
 
-# Feldschema aus deiner Beobachtung
-SCHEMA_FIELDS: List[str] = [
-    "symbol",
-    "bid",
-    "bidsize",
-    "ask",
-    "asksize",
-    "reference",
-    "last",
-    "quotetime",
-    "vega",
-    "theta",
-    "currentleverage",
-]
+# Für Bewertung benötigen wir nur Bid und Symbol + Zeit (optional).
+SCHEMA_FIELDS: List[str] = ["symbol", "bid", "quotetime"]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def validate_isin(isin: str) -> str:
+    isin = (isin or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{12}", isin):
+        raise ValueError("ISIN muss 12 Zeichen (A-Z/0-9) sein.")
+    return isin
 
 
 def isin_to_item(isin: str) -> str:
-    """
-    BNP scheint Produkt-Items so zu benennen: X0000010800<ISIN>.
-    Falls du später andere Prefixe brauchst, hier erweitern.
-    """
-    isin = isin.strip().upper()
-    # Minimalvalidierung (ISIN ist typischerweise 12 Zeichen, alphanumerisch)
-    if not re.fullmatch(r"[A-Z0-9]{12}", isin):
-        raise ValueError("ISIN muss 12 Zeichen (A-Z/0-9) sein.")
-    return f"X0000010800{isin}"
+    isin = validate_isin(isin)
+    tmpl = (LS_ITEM_TEMPLATE or "").strip() or "X0000010800{isin}"
+    if "{isin}" not in tmpl:
+        raise ValueError("LS_ITEM_TEMPLATE muss '{isin}' enthalten.")
+    return tmpl.format(isin=isin)
 
 
-def _try_num(v: Optional[str]) -> Any:
-    """Konvertiert Zahlstrings zu float, sonst gibt String/None zurück."""
+def _try_float(v: Optional[str]) -> Optional[float]:
     if v is None:
         return None
     if v == "":
-        return ""
+        return None
     try:
-        # BNP sendet meistens Punkt als Dezimaltrenner im Push
         return float(v)
     except Exception:
-        return v
+        return None
 
 
-def decode_field_values(
-    tokens: List[str],
-    fields: List[str],
-    prev_state: Dict[str, Optional[str]],
-) -> Dict[str, Optional[str]]:
+def decode_field_values(tokens: List[str], fields: List[str], prev: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     """
     Decodiert Lightstreamer TLCP Values (| getrennt) mit:
     - "" -> unverändert
@@ -94,35 +87,28 @@ def decode_field_values(
     - "$" -> leerstring
     - "^N" -> N Felder unverändert (ab aktueller Position)
     """
-    state = dict(prev_state)  # copy
-    fi = 0  # field index
-    ti = 0  # token index
+    state = dict(prev)
+    fi = 0
+    ti = 0
 
     while fi < len(fields) and ti < len(tokens):
         tok = tokens[ti]
-
-        # ^N: N Felder unverändert
         if tok.startswith("^") and tok[1:].isdigit():
-            n = int(tok[1:])
-            fi += n
+            fi += int(tok[1:])
             ti += 1
             continue
 
-        field_name = fields[fi]
-
+        key = fields[fi]
         if tok == "":
-            # unverändert
             fi += 1
             ti += 1
             continue
         if tok == "#":
-            state[field_name] = None
+            state[key] = None
         elif tok == "$":
-            state[field_name] = ""
+            state[key] = ""
         else:
-            # Falls irgendwann ^P/^T auftaucht, lassen wir es als raw string stehen.
-            state[field_name] = tok
-
+            state[key] = tok
         fi += 1
         ti += 1
 
@@ -131,40 +117,21 @@ def decode_field_values(
 
 async def _ws_connect() -> Any:
     """
-    websockets hat in neueren Versionen Parameter umbenannt:
-    - extra_headers -> additional_headers
-    Wir unterstützen beides, damit es mit websockets==14.1 sauber läuft.
+    Robust gegen Unterschiede im Server-Handshake:
+    - ggf. ohne UA
+    - ggf. ohne Subprotocol
+    - permessage-deflate deaktiviert
     """
-    # Häufige Ursache für HTTP 400: Server akzeptiert Subprotocol/Origin nicht.
-    # Wir probieren daher ein paar sinnvolle Kombinationen.
-    subprotocol_candidates: List[Optional[str]] = []
-    for p in [
-        LS_SUBPROTOCOL,
-        os.getenv("LS_SUBPROTOCOL_FALLBACK_1", "TLCP-2.4.0.lightstreamer.com"),
-        os.getenv("LS_SUBPROTOCOL_FALLBACK_2", "TLCP-2.3.0.lightstreamer.com"),
-    ]:
-        p = (p or "").strip()
-        if p and p not in subprotocol_candidates:
-            subprotocol_candidates.append(p)
-
-    # Als letzte Option: ohne Subprotocol-Header verbinden (manche Setups sind strikt).
-    subprotocol_candidates.append(None)
-
-    origin_candidates: List[Optional[str]] = []
-    if LS_ORIGIN not in origin_candidates:
-        origin_candidates.append(LS_ORIGIN)
-    if None not in origin_candidates:
-        origin_candidates.append(None)
+    subprotocols: List[Optional[str]] = [LS_SUBPROTOCOL, None]
+    origins: List[Optional[str]] = [LS_ORIGIN, None]
 
     last_exc: Optional[BaseException] = None
 
-    for proto in subprotocol_candidates:
-        for origin in origin_candidates:
+    for proto in subprotocols:
+        for origin in origins:
             for send_ua in (True, False):
                 kwargs: Dict[str, Any] = {
-                    "ping_interval": None,  # Lightstreamer nutzt eigene PROBE
-                    # Lightstreamer-WS kann empfindlich auf Extensions reagieren.
-                    # PerMessage-Deflate deaktivieren hilft oft bei kryptischen 1011-Abbrüchen.
+                    "ping_interval": None,
                     "compression": None,
                 }
                 if proto is not None:
@@ -177,77 +144,44 @@ async def _ws_connect() -> Any:
                     headers["User-Agent"] = LS_USER_AGENT
 
                 try:
-                    # websockets>=14 nutzt additional_headers
                     ws = await websockets.connect(
                         LS_WSS_URL,
                         **kwargs,
                         additional_headers=headers or None,
                     )
-                    logger.info(
-                        "WS connected (proto=%s, origin=%s, ua=%s)",
-                        proto or "<none>",
-                        origin or "<none>",
-                        "on" if send_ua else "off",
-                    )
+                    logger.info("LS WS connected (proto=%s origin=%s ua=%s)", proto or "<none>", origin or "<none>", send_ua)
                     return ws
                 except TypeError:
-                    # Fallback für ältere Signaturen (extra_headers)
+                    # Fallback für ältere websockets Signaturen
                     try:
                         ws = await websockets.connect(
                             LS_WSS_URL,
                             **kwargs,
                             extra_headers=headers or None,
                         )
-                        logger.info(
-                            "WS connected (proto=%s, origin=%s, ua=%s) [extra_headers]",
-                            proto or "<none>",
-                            origin or "<none>",
-                            "on" if send_ua else "off",
-                        )
+                        logger.info("LS WS connected (proto=%s origin=%s ua=%s)", proto or "<none>", origin or "<none>", send_ua)
                         return ws
                     except Exception as e:
                         last_exc = e
-                        logger.warning(
-                            "WS connect failed (proto=%s, origin=%s, ua=%s): %s",
-                            proto or "<none>",
-                            origin or "<none>",
-                            "on" if send_ua else "off",
-                            e,
-                        )
                 except Exception as e:
                     last_exc = e
-                    logger.warning(
-                        "WS connect failed (proto=%s, origin=%s, ua=%s): %s",
-                        proto or "<none>",
-                        origin or "<none>",
-                        "on" if send_ua else "off",
-                        e,
-                    )
 
     assert last_exc is not None
     raise last_exc
 
 
-@dataclass
 class LightstreamerSession:
-    """Eine aktive Lightstreamer WS Session, genau ein Subscription-Set (für MVP)."""
-
-    websocket: Optional[Any] = None
-    session_id: Optional[str] = None
-    current_isin: Optional[str] = None
-    current_item: Optional[str] = None
-    sub_id: int = 1
-    req_id: int = 1
-
-    # Cache pro itemIndex: letzter decoded state
-    item_state: Dict[int, Dict[str, Optional[str]]] = field(default_factory=dict)
+    def __init__(self) -> None:
+        self.websocket: Optional[Any] = None
+        self.session_id: Optional[str] = None
+        self.sub_id: int = 1
+        self.req_id: int = 1
+        self.item_state: Dict[int, Dict[str, Optional[str]]] = {}
 
     async def connect(self) -> None:
-        logger.info("Connecting to Lightstreamer WS...")
         self.websocket = await _ws_connect()
 
-        # create_session (zweizeilig)
-        create_params = (
+        params = (
             f"LS_adapter_set={quote(LS_ADAPTER_SET)}"
             f"&LS_user="
             f"&LS_cid={quote(LS_CID)}"
@@ -255,37 +189,28 @@ class LightstreamerSession:
             f"&LS_cause=api"
             f"&LS_password="
         )
-        # Lightstreamer TLCP ist zeilenbasiert; CRLF ist am kompatibelsten.
-        msg = "create_session\r\n" + create_params + "\r\n"
+        msg = "create_session\r\n" + params + "\r\n"
         await self.websocket.send(msg)
-        logger.info("Sent create_session")
 
-        # Warte auf CONOK und Session ID
         while True:
             raw = await self._recv_text()
             for line in self._split_lines(raw):
-                # Explizite Fehler- und Warnpfade
                 if line.startswith("CONERR,") or line.startswith("ERROR,"):
                     raise RuntimeError(f"Lightstreamer create_session failed: {line}")
                 if line.startswith("CONOK,"):
-                    # Format: CONOK,<sessionId>,...
                     parts = line.split(",")
                     if len(parts) >= 2:
                         self.session_id = parts[1].strip()
-                        logger.info("Lightstreamer session established: %s", self.session_id)
                         return
 
-    async def subscribe_isin(self, isin: str) -> None:
+    async def subscribe_items(self, items: List[str]) -> None:
         if not self.websocket or not self.session_id:
             raise RuntimeError("Session not connected")
+        if not items:
+            raise ValueError("items darf nicht leer sein")
 
-        self.current_isin = isin.strip().upper()
-        self.current_item = isin_to_item(self.current_isin)
-
-        # Subscription control (add)
-        # Schema muss URL-encoded sein (Spaces -> %20)
         schema = quote(" ".join(SCHEMA_FIELDS))
-        group = quote(self.current_item)
+        group = quote(" ".join(items))
 
         params = (
             f"LS_reqId={self.req_id}"
@@ -300,10 +225,8 @@ class LightstreamerSession:
             f"&LS_requested_max_frequency=unfiltered"
             f"&LS_session={quote(self.session_id)}"
         )
-
         msg = "control\r\n" + params + "\r\n"
         await self.websocket.send(msg)
-        logger.info("Subscribed to %s (item=%s)", self.current_isin, self.current_item)
         self.req_id += 1
 
     async def close(self) -> None:
@@ -325,12 +248,6 @@ class LightstreamerSession:
 
     @staticmethod
     def _split_lines(raw: str) -> List[str]:
-        """
-        DevTools zeigt manchmal mehrere Messages in einer Zeile (z.B. "U,... U,...").
-        Wir splitten konservativ:
-        - zuerst nach Zeilenumbrüchen
-        - dann innerhalb jeder Zeile nach " U," (space+U,)
-        """
         raw = raw.replace("\r", "")
         out: List[str] = []
         for line in raw.split("\n"):
@@ -346,137 +263,97 @@ class LightstreamerSession:
                 out.append(line)
         return out
 
-    def handle_line(self, line: str) -> Optional[Dict[str, Any]]:
-        """
-        Parst U-Updates. Gibt ein Quote-Dict zurück oder None.
-        """
-        # Keepalive
-        if line == "PROBE":
-            return None
 
-        # U,<subId>,<itemIndex>,<values>
-        if line.startswith("U,"):
-            # Split nur die ersten 3 Kommas, Rest ist values
-            # Beispiel:
-            # U,1,1,DE000...|1.1800|10000|0.0000|0|...
-            m = re.match(r"^U,(\d+),(\d+),(.*)$", line)
-            if not m:
-                return None
+async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Optional[float]]:
+    """
+    Holt für eine ISIN-Liste die aktuellen Bid-Quotes (Snapshot/erste Updates) über Lightstreamer.
+    Gibt dict[ISIN] = bid (float) oder None (falls nicht erhalten).
+    """
+    clean_isins = [validate_isin(i) for i in isins]
+    items = [isin_to_item(i) for i in clean_isins]
+    idx_to_isin = {idx + 1: isin for idx, isin in enumerate(clean_isins)}
 
-            sub_id = int(m.group(1))
-            item_index = int(m.group(2))
-            values_str = m.group(3)
+    sess = LightstreamerSession()
+    bids: Dict[str, Optional[float]] = {i: None for i in clean_isins}
 
-            # Values sind '|' getrennt
-            tokens = values_str.split("|")
+    try:
+        await sess.connect()
+        await sess.subscribe_items(items)
 
-            prev = self.item_state.get(item_index, {f: None for f in SCHEMA_FIELDS})
-            decoded = decode_field_values(tokens, SCHEMA_FIELDS, prev)
-            self.item_state[item_index] = decoded
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while asyncio.get_running_loop().time() < deadline:
+            if all(v is not None for v in bids.values()):
+                break
 
-            # In decoded["symbol"] steht meistens die ISIN
-            payload = {
-                "type": "quote",
-                "sub_id": sub_id,
-                "item_index": item_index,
-                "isin": decoded.get("symbol") or self.current_isin,
-                "item": self.current_item,
-                "raw": decoded,
-                "parsed": {k: _try_num(v) for k, v in decoded.items()},
-            }
-            return payload
+            try:
+                raw = await asyncio.wait_for(sess._recv_text(), timeout=max(0.2, deadline - asyncio.get_running_loop().time()))
+            except asyncio.TimeoutError:
+                continue
+            except ConnectionClosed as e:
+                raise RuntimeError(f"WS closed: code={e.code} reason={e.reason}") from e
 
-        return None
+            for line in sess._split_lines(raw):
+                if line.startswith("REQERR,") or line.startswith("ERROR,"):
+                    raise RuntimeError(f"Lightstreamer error: {line}")
+                if not line.startswith("U,"):
+                    continue
+
+                m = re.match(r"^U,(\d+),(\d+),(.*)$", line)
+                if not m:
+                    continue
+                item_index = int(m.group(2))
+                values_str = m.group(3)
+                tokens = values_str.split("|")
+
+                prev = sess.item_state.get(item_index, {f: None for f in SCHEMA_FIELDS})
+                decoded = decode_field_values(tokens, SCHEMA_FIELDS, prev)
+                sess.item_state[item_index] = decoded
+
+                isin = decoded.get("symbol") or idx_to_isin.get(item_index)
+                if not isin:
+                    continue
+                bid = _try_float(decoded.get("bid"))
+                if bid is not None:
+                    bids[isin] = bid
+
+        return bids
+    finally:
+        await sess.close()
+
+
+# ----------------- API Models -----------------
+
+
+class PortfolioCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class PositionIn(BaseModel):
+    isin: str
+    quantity: float = Field(gt=0)
+    entry_price: float = Field(gt=0)
+
+
+class PortfolioOut(BaseModel):
+    id: int
+    name: str
+
+
+class PositionOut(BaseModel):
+    id: int
+    isin: str
+    quantity: float
+    entry_price: float
 
 
 # ----------------- FastAPI App -----------------
 
+
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
-clients: Set[WebSocket] = set()
-ls_lock = asyncio.Lock()
-ls_session: Optional[LightstreamerSession] = None
-ls_task: Optional[asyncio.Task] = None
-
-
-async def broadcast(obj: Dict[str, Any]) -> None:
-    dead: List[WebSocket] = []
-    msg = json.dumps(obj, ensure_ascii=False)
-
-    for ws in list(clients):
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            dead.append(ws)
-
-    for ws in dead:
-        clients.discard(ws)
-
-
-async def run_ls_stream(isin: str) -> None:
-    """
-    Startet eine LS-Verbindung + Subscription und broadcastet Updates.
-    Läuft, bis Task gecancelt wird.
-    """
-    global ls_session
-    sess = LightstreamerSession()
-
-    try:
-        await broadcast({"type": "status", "level": "info", "message": "Verbinde zu BNP Push..."})
-        await sess.connect()
-        await broadcast({"type": "status", "level": "info", "message": "Session OK, subscribe..."})
-        await sess.subscribe_isin(isin)
-        await broadcast({"type": "status", "level": "success", "message": f"Subscribed: {isin}"})
-
-        ls_session = sess
-
-        while True:
-            try:
-                raw = await sess._recv_text()
-            except ConnectionClosed as e:
-                # websockets liefert Close-Code/Reason – das ist die wichtigste Info beim Debuggen.
-                raise RuntimeError(f"WS closed: code={e.code} reason={e.reason}") from e
-
-            for line in sess._split_lines(raw):
-                # Wenn Lightstreamer einen Request ablehnt, sehen wir das hier.
-                if line.startswith("REQERR,") or line.startswith("ERROR,"):
-                    raise RuntimeError(f"Lightstreamer error: {line}")
-
-                evt = sess.handle_line(line)
-                if evt:
-                    await broadcast(evt)
-
-    except asyncio.CancelledError:
-        await broadcast({"type": "status", "level": "warn", "message": "Stream gestoppt."})
-        raise
-    except Exception as e:
-        logger.exception("LS stream error")
-        await broadcast({"type": "status", "level": "error", "message": f"Fehler im Stream: {e}"})
-    finally:
-        try:
-            await sess.close()
-        except Exception:
-            pass
-
-
-async def start_stream(isin: str) -> None:
-    """
-    Stoppt ggf. laufenden Stream und startet neu mit anderer ISIN.
-    """
-    global ls_task, ls_session
-    async with ls_lock:
-        if ls_task and not ls_task.done():
-            ls_task.cancel()
-            try:
-                await ls_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-
-        ls_session = None
-        ls_task = asyncio.create_task(run_ls_stream(isin))
+_conn = connect_db()
+init_db(_conn)
 
 
 @app.get("/")
@@ -484,39 +361,132 @@ async def index():
     return FileResponse("app/static/index.html")
 
 
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    await ws.accept()
-    clients.add(ws)
+@app.get("/api/portfolios")
+async def list_portfolios() -> List[Dict[str, Any]]:
+    cur = _conn.execute(
+        """
+        SELECT p.id, p.name, COUNT(pos.id) AS positions_count
+        FROM portfolios p
+        LEFT JOIN positions pos ON pos.portfolio_id = p.id
+        GROUP BY p.id
+        ORDER BY p.id DESC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
 
-    # Optional: beim Connect Default-Status senden
-    await ws.send_text(json.dumps({
-        "type": "status",
-        "level": "info",
-        "message": "Verbunden. Bitte ISIN eingeben und Subscribe klicken."
-    }, ensure_ascii=False))
 
-    try:
-        while True:
-            data = await ws.receive_text()
-            try:
-                msg = json.loads(data)
-            except Exception:
-                await ws.send_text(json.dumps({"type": "status", "level": "error", "message": "Ungültiges JSON."}, ensure_ascii=False))
-                continue
+@app.post("/api/portfolios", status_code=201)
+async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
+    cur = _conn.execute("INSERT INTO portfolios(name) VALUES (?)", (body.name.strip(),))
+    _conn.commit()
+    return PortfolioOut(id=int(cur.lastrowid), name=body.name.strip())
 
-            if msg.get("type") == "subscribe":
-                isin = (msg.get("isin") or "").strip().upper()
-                try:
-                    # Validierung (wirft ValueError falls falsch)
-                    _ = isin_to_item(isin)
-                except Exception as e:
-                    await ws.send_text(json.dumps({"type": "status", "level": "error", "message": f"ISIN ungültig: {e}"}, ensure_ascii=False))
-                    continue
 
-                await start_stream(isin)
+@app.get("/api/portfolios/{portfolio_id}")
+async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
+    cur = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
 
-    except WebSocketDisconnect:
-        pass
-    finally:
-        clients.discard(ws)
+    cur2 = _conn.execute(
+        "SELECT id, isin, quantity, entry_price FROM positions WHERE portfolio_id=? ORDER BY id ASC",
+        (portfolio_id,),
+    )
+    return {"portfolio": dict(row), "positions": [dict(r) for r in cur2.fetchall()]}
+
+
+@app.put("/api/portfolios/{portfolio_id}/positions")
+async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> Dict[str, Any]:
+    # Ensure portfolio exists
+    cur = _conn.execute("SELECT id FROM portfolios WHERE id=?", (portfolio_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+
+    cleaned: List[PositionIn] = []
+    seen: set[str] = set()
+    for p in positions:
+        isin = validate_isin(p.isin)
+        if isin in seen:
+            raise HTTPException(status_code=400, detail=f"Doppelte ISIN im Request: {isin}")
+        seen.add(isin)
+        cleaned.append(PositionIn(isin=isin, quantity=p.quantity, entry_price=p.entry_price))
+
+    with _conn:
+        _conn.execute("DELETE FROM positions WHERE portfolio_id=?", (portfolio_id,))
+        for p in cleaned:
+            _conn.execute(
+                "INSERT INTO positions(portfolio_id, isin, quantity, entry_price) VALUES (?,?,?,?)",
+                (portfolio_id, p.isin, p.quantity, p.entry_price),
+            )
+
+    return await get_portfolio(portfolio_id)
+
+
+@app.post("/api/portfolios/{portfolio_id}/value")
+async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
+    cur = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,))
+    portfolio = cur.fetchone()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+
+    cur2 = _conn.execute(
+        "SELECT id, isin, quantity, entry_price FROM positions WHERE portfolio_id=? ORDER BY id ASC",
+        (portfolio_id,),
+    )
+    positions = [dict(r) for r in cur2.fetchall()]
+    if not positions:
+        return {"portfolio": dict(portfolio), "valued_at": now_iso(), "positions": [], "totals": {"market_value": 0.0, "cost_basis": 0.0, "pnl": 0.0, "pnl_pct": None}}
+
+    isins = [p["isin"] for p in positions]
+    timeout_s = float(os.getenv("LS_BID_TIMEOUT", "8"))
+    bids = await fetch_bids(isins, timeout_s=timeout_s)
+
+    out_positions: List[Dict[str, Any]] = []
+    total_mv = 0.0
+    total_cb = 0.0
+
+    for p in positions:
+        isin = p["isin"]
+        qty = float(p["quantity"])
+        entry = float(p["entry_price"])
+        bid = bids.get(isin)
+
+        cost_basis = entry * qty
+        market_value = (bid * qty) if bid is not None else None
+        pnl = (market_value - cost_basis) if market_value is not None else None
+        pnl_pct = (pnl / cost_basis) if (pnl is not None and cost_basis != 0) else None
+
+        if market_value is not None:
+            total_mv += market_value
+        total_cb += cost_basis
+
+        out_positions.append(
+            {
+                "id": p["id"],
+                "isin": isin,
+                "quantity": qty,
+                "entry_price": entry,
+                "bid": bid,
+                "market_value": market_value,
+                "cost_basis": cost_basis,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+            }
+        )
+
+    total_pnl = (total_mv - total_cb) if (total_cb != 0 and total_mv is not None) else (total_mv - total_cb)
+    total_pnl_pct = (total_pnl / total_cb) if total_cb else None
+
+    return {
+        "portfolio": dict(portfolio),
+        "valued_at": now_iso(),
+        "positions": out_positions,
+        "totals": {
+            "market_value": total_mv,
+            "cost_basis": total_cb,
+            "pnl": total_pnl,
+            "pnl_pct": total_pnl_pct,
+        },
+        "meta": {"quote_timeout_s": timeout_s},
+    }
