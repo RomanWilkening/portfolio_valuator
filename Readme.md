@@ -11,6 +11,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Danach im Browser öffnen: `http://localhost:8000/`
 
+### Seiten
+
+- Dashboard (Auto-Bewertung): `http://localhost:8000/`
+- Portfolio-Pflege (ohne Auto-Refresh): `http://localhost:8000/manage`
+
 ### Persistenz (SQLite)
 
 - Default DB-Pfad: `data/app.db`

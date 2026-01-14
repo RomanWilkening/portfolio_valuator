@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Portfolio-Pflege</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 1100px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
+    input, select { padding: 10px; font-size: 16px; }
+    input[type="number"] { width: 160px; }
+    button { padding: 10px 14px; font-size: 16px; cursor: pointer; }
+    #status { margin: 12px 0; padding: 10px; border-radius: 8px; }
+    .info { background: #eef; }
+    .success { background: #e8ffe8; }
+    .warn { background: #fff6d6; }
+    .error { background: #ffe8e8; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    code { background: #f3f3f3; padding: 2px 4px; border-radius: 4px; }
+    .muted { color: #666; }
+    .card { border: 1px solid #eee; border-radius: 12px; padding: 14px; margin-top: 14px; background: #fff; }
+    .pill { display:inline-block; background:#f6f6f6; border:1px solid #eee; border-radius:999px; padding:6px 10px; }
+    .right { text-align: right; }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <div class="row" style="justify-content: space-between;">
+    <h1 style="margin:0;">Portfolio-Pflege</h1>
+    <div class="row">
+      <a class="pill" href="/">Zum Dashboard</a>
+    </div>
+  </div>
+
+  <div class="muted">Pflege-Seite: Portfolios anlegen, Positionen bearbeiten. Kein Auto-Refresh (damit Eingaben stabil bleiben).</div>
+  <div id="status" class="info">Lade…</div>
+
+  <div class="card">
+    <h2>Portfolios</h2>
+    <div class="row">
+      <select id="portfolioSelect" style="min-width: 320px;"></select>
+      <button id="reloadBtn">Neu laden</button>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <input id="newPortfolioName" placeholder="Neues Portfolio (Name)" style="min-width: 320px;" />
+      <button id="createPortfolioBtn">Anlegen</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Positionen (ausgewähltes Portfolio)</h2>
+    <div class="muted">Gleiche ISIN wird beim Speichern ersetzt. Menge = Stückzahl, Entry = Einstandskurs.</div>
+
+    <div class="row" style="margin-top: 10px;">
+      <input id="isin" placeholder="ISIN (12 Zeichen)" style="width: 220px;" />
+      <input id="qty" type="number" step="any" min="0" placeholder="Quantity" />
+      <input id="entry" type="number" step="any" min="0" placeholder="Entry Price" />
+      <button id="addPosBtn">Speichern</button>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>ISIN</th>
+          <th class="right">Quantity</th>
+          <th class="right">Entry</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const tbody = document.getElementById("tbody");
+
+    const portfolioSelect = document.getElementById("portfolioSelect");
+    const reloadBtn = document.getElementById("reloadBtn");
+    const newPortfolioName = document.getElementById("newPortfolioName");
+    const createPortfolioBtn = document.getElementById("createPortfolioBtn");
+
+    const isinEl = document.getElementById("isin");
+    const qtyEl = document.getElementById("qty");
+    const entryEl = document.getElementById("entry");
+    const addPosBtn = document.getElementById("addPosBtn");
+
+    function setStatus(level, message) {
+      statusEl.className = level;
+      statusEl.textContent = message;
+    }
+
+    function fmtNum(n, digits=6) {
+      if (n === null || n === undefined) return "—";
+      if (!isFinite(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
+    }
+
+    async function api(path, options={}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) return await res.json();
+      return await res.text();
+    }
+
+    let currentPortfolio = null; // {id,name}
+    let currentPositions = []; // [{id,isin,quantity,entry_price}]
+
+    function renderPositions() {
+      tbody.innerHTML = "";
+      for (const p of currentPositions) {
+        const tr = document.createElement("tr");
+        const tds = [
+          p.isin,
+          fmtNum(p.quantity),
+          fmtNum(p.entry_price),
+        ];
+        tds.forEach((val, i) => {
+          const td = document.createElement("td");
+          td.textContent = val;
+          if (i >= 1) td.classList.add("right");
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function loadPortfolios(selectId=null) {
+      setStatus("info", "Lade Portfolios…");
+      const list = await api("/api/portfolios");
+
+      portfolioSelect.innerHTML = "";
+      if (!list.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "— kein Portfolio —";
+        portfolioSelect.appendChild(opt);
+        currentPortfolio = null;
+        currentPositions = [];
+        renderPositions();
+        setStatus("warn", "Noch kein Portfolio vorhanden. Lege eins an.");
+        return;
+      }
+
+      for (const p of list) {
+        const opt = document.createElement("option");
+        opt.value = String(p.id);
+        opt.textContent = `${p.name} (#${p.id}, ${p.positions_count} Pos.)`;
+        portfolioSelect.appendChild(opt);
+      }
+
+      const chosen = selectId ? String(selectId) : (portfolioSelect.value || String(list[0].id));
+      portfolioSelect.value = chosen;
+      await loadPortfolio(chosen);
+    }
+
+    async function loadPortfolio(id) {
+      if (!id) return;
+      setStatus("info", "Lade Portfolio…");
+      const data = await api(`/api/portfolios/${id}`);
+      currentPortfolio = data.portfolio;
+      currentPositions = data.positions || [];
+      renderPositions();
+      setStatus("success", `Portfolio geladen: ${currentPortfolio.name} (#${currentPortfolio.id})`);
+    }
+
+    async function createPortfolio() {
+      const name = (newPortfolioName.value || "").trim();
+      if (!name) return;
+      setStatus("info", "Lege Portfolio an…");
+      const p = await api("/api/portfolios", { method: "POST", body: JSON.stringify({ name }) });
+      newPortfolioName.value = "";
+      await loadPortfolios(p.id);
+      setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id})`);
+    }
+
+    async function savePosition() {
+      if (!currentPortfolio) return;
+      const isin = (isinEl.value || "").trim().toUpperCase();
+      const qty = Number(qtyEl.value);
+      const entry = Number(entryEl.value);
+
+      if (!isin || !isFinite(qty) || qty <= 0 || !isFinite(entry) || entry <= 0) {
+        setStatus("error", "Bitte ISIN, Quantity (>0) und Entry Price (>0) angeben.");
+        return;
+      }
+
+      const next = currentPositions
+        .filter(p => p.isin !== isin)
+        .map(p => ({ isin: p.isin, quantity: p.quantity, entry_price: p.entry_price }));
+      next.push({ isin, quantity: qty, entry_price: entry });
+
+      setStatus("info", "Speichere Positionen…");
+      const data = await api(`/api/portfolios/${currentPortfolio.id}/positions`, {
+        method: "PUT",
+        body: JSON.stringify(next),
+      });
+      currentPositions = data.positions || [];
+      renderPositions();
+      setStatus("success", "Position gespeichert.");
+    }
+
+    reloadBtn.onclick = () => loadPortfolios(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
+    createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
+    portfolioSelect.onchange = () => loadPortfolio(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
+    addPosBtn.onclick = () => savePosition().catch(e => setStatus("error", String(e.message || e)));
+
+    loadPortfolios().catch(e => setStatus("error", String(e.message || e)));
+  </script>
+</body>
+</html>
