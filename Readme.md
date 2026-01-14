@@ -51,3 +51,16 @@ Die Defaults sind auf die bisherige BNP-Lightstreamer-Konfiguration ausgelegt. B
 - `LS_ITEM_TEMPLATE` (default: `X0000010800{isin}`)
 - `LS_ORIGIN` (default: `https://derivate.bnpparibas.com`, leer setzen zum Deaktivieren)
 - `LS_BID_TIMEOUT` (default: `8`)
+
+### MQTT → Home Assistant (Auto-Detect)
+
+Wenn `MQTT_HOST` gesetzt ist, kannst du MQTT im Webinterface (Portfolio-Pflege) **aktivieren**. Default ist **aus**.
+
+- **Discovery Topic**: `homeassistant/sensor/<MQTT_NODE_ID>/<MQTT_OBJECT_ID>/config`
+- **State**: `total_market_value` (numerisch, kurz)
+- **Attributes**: JSON mit `portfolios`, `watchlist`, `totals`, `updated_at`
+
+Wichtige ENV-Variablen (siehe `config/app.env.example`):
+- `MQTT_HOST`, `MQTT_PORT`, optional `MQTT_USERNAME`, `MQTT_PASSWORD`
+- `MQTT_NODE_ID`, `MQTT_OBJECT_ID`, `MQTT_BASE_TOPIC`
+- `MQTT_DEBOUNCE_MS` (Default 1000ms)

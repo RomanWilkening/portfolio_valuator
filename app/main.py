@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 from websockets.exceptions import ConnectionClosed
 
 from app.db import connect_db, init_db
+from app.mqtt_ha import HomeAssistantMqttPublisher, build_entity_payload, load_mqtt_settings
+from app.settings import get_bool, set_bool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("portfolio-valuator")
@@ -572,6 +574,7 @@ class StreamManager:
                                 self.watch_prices[key] = float(evt["watch_price"])
                                 self.watch_fields[key] = str(evt["watch_field"])
                         await self.broadcast(evt)
+                        _publish_mqtt_snapshot()
 
                 try:
                     await sess.close()
@@ -598,6 +601,58 @@ class StreamManager:
 
 
 stream_manager = StreamManager()
+_mqtt: Optional[HomeAssistantMqttPublisher] = None
+
+
+def _publish_mqtt_snapshot() -> None:
+    """
+    Publishes the full payload (portfolios/positions/watchlist) to a single HA entity.
+    Best-effort + debounced inside publisher.
+    """
+    global _mqtt
+    if not _mqtt or not _mqtt_is_enabled():
+        return
+    bids = stream_manager._bids_as_optional()
+    watch_prices = stream_manager._watch_prices_as_optional()
+
+    portfolios = compute_all_valuations_from_bids(bids)
+    watchlist = compute_watchlist_from_prices(watch_prices, stream_manager.watch_fields)
+
+    state_value, attrs = build_entity_payload(
+        portfolios=portfolios,
+        watchlist=watchlist,
+        meta={"source": "stream_cache"},
+    )
+    _mqtt.publish_now(state_value, attrs)
+
+
+def _mqtt_is_enabled() -> bool:
+    return get_bool(_conn, "mqtt_enabled", default=False)
+
+
+def _set_mqtt_enabled(enabled: bool) -> None:
+    set_bool(_conn, "mqtt_enabled", enabled)
+
+
+def _mqtt_connect_if_enabled() -> None:
+    global _mqtt
+    if not _mqtt_is_enabled():
+        return
+    if _mqtt:
+        return
+    s = load_mqtt_settings()
+    if not s.host:
+        raise RuntimeError("MQTT_HOST ist nicht gesetzt.")
+    _mqtt = HomeAssistantMqttPublisher(s)
+    _mqtt.connect()
+    _publish_mqtt_snapshot()
+
+
+def _mqtt_disconnect() -> None:
+    global _mqtt
+    if _mqtt:
+        _mqtt.close()
+    _mqtt = None
 
 
 async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Optional[float]]:
@@ -757,6 +812,11 @@ init_db(_conn)
 async def _startup() -> None:
     # Stream startet erst, wenn ein Dashboard-Client verbunden ist.
     stream_manager.start()
+    # MQTT default: aus. Nur verbinden, wenn UI-Setting mqtt_enabled=true ist.
+    try:
+        _mqtt_connect_if_enabled()
+    except Exception as e:
+        logger.warning("MQTT connect failed: %s", e)
 
 
 @app.on_event("shutdown")
@@ -767,6 +827,7 @@ async def _shutdown() -> None:
             await stream_manager._task
         except Exception:
             pass
+    _mqtt_disconnect()
 
 
 @app.get("/")
@@ -798,6 +859,7 @@ async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
     cur = _conn.execute("INSERT INTO portfolios(name) VALUES (?)", (body.name.strip(),))
     _conn.commit()
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return PortfolioOut(id=int(cur.lastrowid), name=body.name.strip())
 
 
@@ -817,6 +879,7 @@ async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Watchlist-Eintrag konnte nicht gespeichert werden: {e}")
 
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return {"id": int(cur.lastrowid), "isin": isin, "label": label}
 
 
@@ -825,6 +888,7 @@ async def delete_watchlist_item(item_id: int) -> None:
     with _conn:
         _conn.execute("DELETE FROM watchlist WHERE id=?", (item_id,))
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return None
 
 
@@ -913,6 +977,7 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
             )
 
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return await get_portfolio(portfolio_id)
 
 
@@ -923,6 +988,7 @@ async def delete_portfolio(portfolio_id: int) -> None:
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return None
 
 
@@ -933,6 +999,7 @@ async def delete_position(portfolio_id: int, position_id: int) -> None:
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Position nicht gefunden")
     stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
     return None
 
 
@@ -971,3 +1038,30 @@ async def ws_dashboard(ws: WebSocket):
         pass
     finally:
         await stream_manager.remove_client(ws)
+
+
+@app.get("/api/mqtt")
+async def mqtt_status() -> Dict[str, Any]:
+    s = load_mqtt_settings()
+    enabled = _mqtt_is_enabled()
+    return {
+        "enabled": enabled,
+        "connected": bool(_mqtt),
+        "host": s.host,
+        "port": s.port,
+        "discovery_topic": s.discovery_topic,
+        "state_topic": s.state_topic,
+        "attributes_topic": s.attributes_topic,
+        "availability_topic": s.availability_topic,
+    }
+
+
+@app.put("/api/mqtt/enabled")
+async def mqtt_set_enabled(body: Dict[str, Any]) -> Dict[str, Any]:
+    enabled = bool(body.get("enabled"))
+    _set_mqtt_enabled(enabled)
+    if enabled:
+        _mqtt_connect_if_enabled()
+    else:
+        _mqtt_disconnect()
+    return await mqtt_status()

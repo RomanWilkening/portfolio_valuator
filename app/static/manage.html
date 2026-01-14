@@ -51,6 +51,21 @@
   </div>
 
   <div class="card">
+    <h2>MQTT (Home Assistant)</h2>
+    <div class="muted">Default ist MQTT aus. Verbindungsdaten kommen aus <code>config/app.env</code> (MQTT_HOST, MQTT_PORT, …).</div>
+    <div class="row" style="margin-top: 10px;">
+      <span class="pill">Status: <strong id="mqttStatus">—</strong></span>
+      <button id="mqttToggleBtn">MQTT einschalten</button>
+      <button id="mqttReloadBtn">Neu laden</button>
+    </div>
+    <div class="muted" style="margin-top: 8px;">
+      Discovery Topic: <code id="mqttDiscovery">—</code><br/>
+      State Topic: <code id="mqttStateTopic">—</code><br/>
+      Attributes Topic: <code id="mqttAttrTopic">—</code>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Positionen (ausgewähltes Portfolio)</h2>
     <div class="muted">Gleiche ISIN wird beim Speichern ersetzt. Menge = Stückzahl, Entry = Einstandskurs.</div>
 
@@ -83,6 +98,13 @@
     const deletePortfolioBtn = document.getElementById("deletePortfolioBtn");
     const newPortfolioName = document.getElementById("newPortfolioName");
     const createPortfolioBtn = document.getElementById("createPortfolioBtn");
+
+    const mqttStatusEl = document.getElementById("mqttStatus");
+    const mqttToggleBtn = document.getElementById("mqttToggleBtn");
+    const mqttReloadBtn = document.getElementById("mqttReloadBtn");
+    const mqttDiscoveryEl = document.getElementById("mqttDiscovery");
+    const mqttStateTopicEl = document.getElementById("mqttStateTopic");
+    const mqttAttrTopicEl = document.getElementById("mqttAttrTopic");
 
     const isinEl = document.getElementById("isin");
     const qtyEl = document.getElementById("qty");
@@ -191,6 +213,30 @@
       setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id})`);
     }
 
+    async function loadMqttStatus() {
+      const s = await api("/api/mqtt");
+      const enabled = !!s.enabled;
+      const connected = !!s.connected;
+      const host = s.host || "";
+      mqttStatusEl.textContent = enabled
+        ? (connected ? `an (verbunden: ${host})` : `an (nicht verbunden: ${host || "MQTT_HOST fehlt"})`)
+        : "aus";
+      mqttToggleBtn.textContent = enabled ? "MQTT ausschalten" : "MQTT einschalten";
+      mqttDiscoveryEl.textContent = s.discovery_topic || "—";
+      mqttStateTopicEl.textContent = s.state_topic || "—";
+      mqttAttrTopicEl.textContent = s.attributes_topic || "—";
+      return s;
+    }
+
+    async function toggleMqtt() {
+      const s = await api("/api/mqtt");
+      const next = !s.enabled;
+      setStatus("info", next ? "Schalte MQTT ein…" : "Schalte MQTT aus…");
+      await api("/api/mqtt/enabled", { method: "PUT", body: JSON.stringify({ enabled: next }) });
+      await loadMqttStatus();
+      setStatus("success", next ? "MQTT ist an." : "MQTT ist aus.");
+    }
+
     async function deletePortfolio() {
       if (!currentPortfolio) return;
       const ok = confirm(`Portfolio wirklich löschen?\\n\\n${currentPortfolio.name} (#${currentPortfolio.id})`);
@@ -234,8 +280,11 @@
     deletePortfolioBtn.onclick = () => deletePortfolio().catch(e => setStatus("error", String(e.message || e)));
     portfolioSelect.onchange = () => loadPortfolio(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
     addPosBtn.onclick = () => savePosition().catch(e => setStatus("error", String(e.message || e)));
+    mqttReloadBtn.onclick = () => loadMqttStatus().catch(e => setStatus("error", String(e.message || e)));
+    mqttToggleBtn.onclick = () => toggleMqtt().catch(e => setStatus("error", String(e.message || e)));
 
     loadPortfolios().catch(e => setStatus("error", String(e.message || e)));
+    loadMqttStatus().catch(() => {});
   </script>
 </body>
 </html>
