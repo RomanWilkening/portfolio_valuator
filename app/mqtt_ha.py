@@ -80,8 +80,11 @@ class HomeAssistantMqttPublisher:
     def __init__(self, settings: MqttSettings) -> None:
         self.s = settings
         self.client: Optional[mqtt.Client] = None
+        self._connected: bool = False
         self._last_publish_ts = 0.0
         self._known_objects: Set[str] = set()
+        # Cache discovery payloads so we can republish them after reconnects.
+        self._discovery_cache: Dict[str, Dict[str, Any]] = {}
 
     def connect(self) -> None:
         if not self.s.host:
@@ -93,21 +96,40 @@ class HomeAssistantMqttPublisher:
 
         def on_connect(c, userdata, flags, rc, properties=None):  # type: ignore[no-untyped-def]
             logger.info("MQTT connected (rc=%s)", rc)
+            self._connected = True
             c.publish(self.s.availability_topic, payload="online", qos=self.s.qos, retain=True)
+            # Make sure Home Assistant gets (back) the discovery configs after reconnects
+            # (e.g. broker restart, network flap). Discovery topics are retained, but
+            # republishing is harmless and helps in edge cases.
+            try:
+                for oid, payload in list(self._discovery_cache.items()):
+                    c.publish(
+                        self._discovery_topic(oid),
+                        payload=json.dumps(payload, ensure_ascii=False),
+                        qos=self.s.qos,
+                        retain=True,
+                    )
+            except Exception as e:
+                logger.warning("MQTT discovery republish failed: %s", e)
 
         def on_disconnect(c, userdata, rc, properties=None):  # type: ignore[no-untyped-def]
             logger.warning("MQTT disconnected (rc=%s)", rc)
+            self._connected = False
 
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
         client.will_set(self.s.availability_topic, payload="offline", qos=self.s.qos, retain=True)
-        client.connect(self.s.host, self.s.port, keepalive=30)
+        # Robust reconnect behaviour (no tight loop, automatic backoff).
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        # Use async connect so the app can keep running even if broker is down at startup.
+        client.connect_async(self.s.host, self.s.port, keepalive=30)
         client.loop_start()
         self.client = client
 
     def close(self) -> None:
         if not self.client:
             return
+        self._connected = False
         try:
             self.client.publish(self.s.availability_topic, payload="offline", qos=self.s.qos, retain=True)
         except Exception:
@@ -170,6 +192,9 @@ class HomeAssistantMqttPublisher:
         if extra_attrs:
             payload["json_attributes_template"] = "{{ value_json | tojson }}"
 
+        # Cache for reconnect republish.
+        self._discovery_cache[object_id] = payload
+
         self.client.publish(
             self._discovery_topic(object_id),
             payload=json.dumps(payload, ensure_ascii=False),
@@ -202,7 +227,7 @@ class HomeAssistantMqttPublisher:
         return False
 
     def publish_all(self, *, portfolios: list[dict], watchlist: list[dict]) -> None:
-        if not self.client:
+        if not self.client or not self._connected:
             return
         if self._debounced():
             return
