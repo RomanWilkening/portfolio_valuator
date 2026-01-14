@@ -29,8 +29,9 @@ LS_CID = os.getenv(
     "pcYgxn8m8 feOojyA1V661f3g2.pz482h95IL5h",
 )
 
-# Origin ist wichtig (Server kann Origin prüfen)
-LS_ORIGIN = os.getenv("LS_ORIGIN", "https://derivate.bnpparibas.com")
+# Origin ist wichtig (Server kann Origin prüfen).
+# Wenn du den Origin-Header testweise deaktivieren willst: LS_ORIGIN="" setzen.
+LS_ORIGIN = os.getenv("LS_ORIGIN", "https://derivate.bnpparibas.com") or None
 
 # User-Agent nur kosmetisch/optional
 LS_USER_AGENT = os.getenv(
@@ -133,30 +134,90 @@ async def _ws_connect() -> Any:
     - extra_headers -> additional_headers
     Wir unterstützen beides, damit es mit websockets==14.1 sauber läuft.
     """
-    kwargs: Dict[str, Any] = {
-        "subprotocols": [LS_SUBPROTOCOL],
-        "origin": LS_ORIGIN,
-        "ping_interval": None,  # Lightstreamer nutzt eigene PROBE
-    }
+    # Häufige Ursache für HTTP 400: Server akzeptiert Subprotocol/Origin nicht.
+    # Wir probieren daher ein paar sinnvolle Kombinationen.
+    subprotocol_candidates: List[str] = []
+    for p in [
+        LS_SUBPROTOCOL,
+        os.getenv("LS_SUBPROTOCOL_FALLBACK_1", "TLCP-2.4.0.lightstreamer.com"),
+        os.getenv("LS_SUBPROTOCOL_FALLBACK_2", "TLCP-2.3.0.lightstreamer.com"),
+    ]:
+        p = (p or "").strip()
+        if p and p not in subprotocol_candidates:
+            subprotocol_candidates.append(p)
 
-    # websockets>=14 nutzt additional_headers
-    try:
-        return await websockets.connect(
-            LS_WSS_URL,
-            **kwargs,
-            additional_headers={
-                "User-Agent": LS_USER_AGENT,
-            },
-        )
-    except TypeError:
-        # Fallback für ältere Signaturen
-        return await websockets.connect(
-            LS_WSS_URL,
-            **kwargs,
-            extra_headers={
-                "User-Agent": LS_USER_AGENT,
-            },
-        )
+    origin_candidates: List[Optional[str]] = []
+    if LS_ORIGIN not in origin_candidates:
+        origin_candidates.append(LS_ORIGIN)
+    if None not in origin_candidates:
+        origin_candidates.append(None)
+
+    last_exc: Optional[BaseException] = None
+
+    for proto in subprotocol_candidates:
+        for origin in origin_candidates:
+            for send_ua in (True, False):
+                kwargs: Dict[str, Any] = {
+                    "subprotocols": [proto],
+                    "ping_interval": None,  # Lightstreamer nutzt eigene PROBE
+                }
+                if origin is not None:
+                    kwargs["origin"] = origin
+
+                headers: Dict[str, str] = {}
+                if send_ua:
+                    headers["User-Agent"] = LS_USER_AGENT
+
+                try:
+                    # websockets>=14 nutzt additional_headers
+                    ws = await websockets.connect(
+                        LS_WSS_URL,
+                        **kwargs,
+                        additional_headers=headers or None,
+                    )
+                    logger.info(
+                        "WS connected (proto=%s, origin=%s, ua=%s)",
+                        proto,
+                        origin or "<none>",
+                        "on" if send_ua else "off",
+                    )
+                    return ws
+                except TypeError:
+                    # Fallback für ältere Signaturen (extra_headers)
+                    try:
+                        ws = await websockets.connect(
+                            LS_WSS_URL,
+                            **kwargs,
+                            extra_headers=headers or None,
+                        )
+                        logger.info(
+                            "WS connected (proto=%s, origin=%s, ua=%s) [extra_headers]",
+                            proto,
+                            origin or "<none>",
+                            "on" if send_ua else "off",
+                        )
+                        return ws
+                    except Exception as e:
+                        last_exc = e
+                        logger.warning(
+                            "WS connect failed (proto=%s, origin=%s, ua=%s): %s",
+                            proto,
+                            origin or "<none>",
+                            "on" if send_ua else "off",
+                            e,
+                        )
+                except Exception as e:
+                    last_exc = e
+                    logger.warning(
+                        "WS connect failed (proto=%s, origin=%s, ua=%s): %s",
+                        proto,
+                        origin or "<none>",
+                        "on" if send_ua else "off",
+                        e,
+                    )
+
+    assert last_exc is not None
+    raise last_exc
 
 
 @dataclass
