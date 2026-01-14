@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Portfolio Dashboard (BNP)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 1100px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
+    button { padding: 10px 14px; font-size: 16px; cursor: pointer; }
+    #status { margin: 12px 0; padding: 10px; border-radius: 8px; }
+    .info { background: #eef; }
+    .success { background: #e8ffe8; }
+    .warn { background: #fff6d6; }
+    .error { background: #ffe8e8; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    code { background: #f3f3f3; padding: 2px 4px; border-radius: 4px; }
+    .muted { color: #666; }
+    .card { border: 1px solid #eee; border-radius: 12px; padding: 14px; margin-top: 14px; background: #fff; }
+    .pill { display:inline-block; background:#f6f6f6; border:1px solid #eee; border-radius:999px; padding:6px 10px; }
+    .right { text-align: right; }
+    .pos { color: #0a7a0a; }
+    .neg { color: #b00020; }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <div class="row" style="justify-content: space-between;">
+    <h1 style="margin:0;">Portfolio Dashboard (BNP)</h1>
+    <div class="row">
+      <a class="pill" href="/manage">Zur Portfolio-Pflege</a>
+    </div>
+  </div>
+
+  <div class="muted">Anzeige-Seite: alle Portfolios sichtbar, Bewertung über <code>bid</code> via Live-Stream.</div>
+  <div id="status" class="info">Lade…</div>
+
+  <div class="card">
+    <div class="row">
+      <span class="pill muted">Stream: <strong id="streamState">—</strong></span>
+      <span class="pill muted">Letztes Quote: <strong id="lastQuoteAt">—</strong></span>
+      <button id="reconnectBtn">Reconnect</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0;">Watchlist</h2>
+    <div class="muted">Einzelne Werte/Indizes (via ISIN) unabhängig von Portfolios mitreporten.</div>
+    <div class="row" style="margin-top: 10px;">
+      <input id="watchIsin" placeholder="ISIN (12 Zeichen) oder X0000080800586" style="width: 260px;" />
+      <input id="watchLabel" placeholder="Label (optional)" style="min-width: 260px;" />
+      <select id="watchCurrency" title="Währung" style="min-width: 110px;">
+        <option value="EUR">EUR</option>
+        <option value="USD">USD</option>
+        <option value="CHF">CHF</option>
+        <option value="GBP">GBP</option>
+      </select>
+      <button id="addWatchBtn">Hinzufügen</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>ISIN</th>
+          <th class="right">Kurs</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="watchTbody"></tbody>
+    </table>
+  </div>
+
+  <div id="portfolios"></div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const portfoliosEl = document.getElementById("portfolios");
+    const streamStateEl = document.getElementById("streamState");
+    const lastQuoteAtEl = document.getElementById("lastQuoteAt");
+    const reconnectBtn = document.getElementById("reconnectBtn");
+    const watchIsinEl = document.getElementById("watchIsin");
+    const watchLabelEl = document.getElementById("watchLabel");
+    const watchCurrencyEl = document.getElementById("watchCurrency");
+    const addWatchBtn = document.getElementById("addWatchBtn");
+    const watchTbody = document.getElementById("watchTbody");
+
+    function setStatus(level, message) {
+      statusEl.className = level;
+      statusEl.textContent = message;
+    }
+
+    function fmtNum(n) {
+      if (n === null || n === undefined) return "—";
+      if (!isFinite(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function fmtPct(x) {
+      if (x === null || x === undefined) return "—";
+      const pct = x * 100;
+      return pct.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "%";
+    }
+
+    function clsPnL(x) {
+      if (x === null || x === undefined) return "";
+      return x >= 0 ? "pos" : "neg";
+    }
+
+    async function api(path, options={}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) return await res.json();
+      return await res.text();
+    }
+
+    // DOM Index: wo welche ISIN vorkommt + Portfolio-Totals
+    const state = {
+      portfolios: new Map(), // pid -> { positions: Map(isin -> posData), totalsEl: {...}, rowsByIsin: Map(isin -> {bidEl,mvEl,pnlEl,pnlPctEl}) }
+      isinsToPortfolios: new Map(), // isin -> Set(pid)
+      bids: new Map(), // isin -> bid (number)
+      watchPrices: new Map(), // key -> price (number)
+      watchFields: new Map(), // key -> which field (reference/last/bid/ask)
+      watch: {
+        byId: new Map(), // id -> {isin,label}
+        rowById: new Map(), // id -> {bidEl}
+        idByIsin: new Map(), // isin -> id
+      },
+    };
+
+    function renderWatchlist(items) {
+      watchTbody.innerHTML = "";
+      state.watch.byId.clear();
+      state.watch.rowById.clear();
+      state.watch.idByIsin.clear();
+
+      for (const it of (items || [])) {
+        const id = Number(it.id);
+        const isin = String(it.isin || "");
+        const label = it.label ? String(it.label) : "";
+        state.watch.byId.set(id, { isin, label });
+        state.watch.idByIsin.set(isin, id);
+        if (it.price !== null && it.price !== undefined) state.watchPrices.set(isin, Number(it.price));
+        if (it.field) state.watchFields.set(isin, String(it.field));
+
+        const tr = document.createElement("tr");
+        const tdLabel = document.createElement("td");
+        const tdIsin = document.createElement("td");
+        const tdBid = document.createElement("td");
+        const tdDel = document.createElement("td");
+        tdBid.classList.add("right");
+
+        tdLabel.textContent = label || "—";
+        tdIsin.textContent = isin;
+
+        const px = state.watchPrices.get(isin);
+        const f = state.watchFields.get(isin);
+        tdBid.textContent = (px === undefined) ? "—" : (fmtNum(px) + (f ? ` (${f})` : ""));
+
+        const btn = document.createElement("button");
+        btn.textContent = "Entfernen";
+        btn.onclick = async () => {
+          setStatus("info", "Entferne Watchlist-Eintrag…");
+          await api(`/api/watchlist/${id}`, { method: "DELETE" });
+          // UI: remove row + mapping
+          state.watch.byId.delete(id);
+          state.watch.rowById.delete(id);
+          state.watch.idByIsin.delete(isin);
+          tr.remove();
+          setStatus("success", "Watchlist-Eintrag entfernt.");
+        };
+        tdDel.appendChild(btn);
+
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdIsin);
+        tr.appendChild(tdBid);
+        tr.appendChild(tdDel);
+        watchTbody.appendChild(tr);
+        state.watch.rowById.set(id, { bidEl: tdBid });
+      }
+    }
+
+    function renderAll(valuations) {
+      portfoliosEl.innerHTML = "";
+      state.portfolios.clear();
+      state.isinsToPortfolios.clear();
+
+      if (!valuations || !valuations.length) {
+        const empty = document.createElement("div");
+        empty.className = "card";
+        empty.innerHTML = "<h2>Keine Portfolios</h2><div class='muted'>Lege ein Portfolio unter <a href='/manage'>Portfolio-Pflege</a> an.</div>";
+        portfoliosEl.appendChild(empty);
+        return;
+      }
+
+      for (const v of valuations) {
+        const pf = v.portfolio;
+        const positions = v.positions || [];
+        const pid = Number(pf.id);
+
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const header = document.createElement("div");
+        header.className = "row";
+        header.innerHTML = `
+          <h2 style="margin:0; flex:1 1 auto;">${pf.name} <span class="muted">(#${pf.id})</span></h2>
+          <span class="pill">Market Value: <strong data-t="mv">${fmtNum(v.totals?.market_value)}</strong></span>
+          <span class="pill">Cost Basis: <strong data-t="cb">${fmtNum(v.totals?.cost_basis)}</strong></span>
+          <span class="pill">PnL: <strong data-t="pnl" class="${clsPnL(v.totals?.pnl)}">${fmtNum(v.totals?.pnl)}</strong></span>
+          <span class="pill muted">valued_at: <strong data-t="at">${v.valued_at || "—"}</strong></span>
+        `;
+        card.appendChild(header);
+
+        const table = document.createElement("table");
+        table.innerHTML = `
+          <thead>
+            <tr>
+              <th>ISIN</th>
+              <th class="right">Quantity</th>
+              <th class="right">Entry</th>
+              <th class="right">Bid</th>
+              <th class="right">Market Value</th>
+              <th class="right">Cost Basis</th>
+              <th class="right">PnL</th>
+              <th class="right">PnL %</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        `;
+
+        const tb = table.querySelector("tbody");
+
+        const portfolioState = {
+          positions: new Map(), // isin -> {quantity, entry_price}
+          totalsEl: {
+            mv: header.querySelector('[data-t="mv"]'),
+            cb: header.querySelector('[data-t="cb"]'),
+            pnl: header.querySelector('[data-t="pnl"]'),
+            at: header.querySelector('[data-t="at"]'),
+          },
+          rowsByIsin: new Map(),
+        };
+
+        for (const p of positions) {
+          const tr = document.createElement("tr");
+          const isin = p.isin;
+          portfolioState.positions.set(isin, { quantity: Number(p.quantity), entry_price: Number(p.entry_price) });
+          if (!state.isinsToPortfolios.has(isin)) state.isinsToPortfolios.set(isin, new Set());
+          state.isinsToPortfolios.get(isin).add(pid);
+
+          // Cache initial bid if present
+          if (p.bid !== null && p.bid !== undefined) state.bids.set(isin, Number(p.bid));
+
+          const cells = [
+            isin,
+            fmtNum(p.quantity),
+            fmtNum(p.entry_price),
+            (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid),
+            (p.market_value === null || p.market_value === undefined) ? "—" : fmtNum(p.market_value),
+            fmtNum(p.cost_basis),
+            (p.pnl === null || p.pnl === undefined) ? "—" : fmtNum(p.pnl),
+            (p.pnl_pct === null || p.pnl_pct === undefined) ? "—" : fmtPct(p.pnl_pct),
+          ];
+
+          let bidEl, mvEl, pnlEl, pnlPctEl;
+          cells.forEach((val, i) => {
+            const td = document.createElement("td");
+            td.textContent = val;
+            if (i >= 1) td.classList.add("right");
+            if (i === 6 || i === 7) {
+              const c = clsPnL(p.pnl);
+              if (c) td.classList.add(c);
+            }
+            if (i === 3) bidEl = td;
+            if (i === 4) mvEl = td;
+            if (i === 6) pnlEl = td;
+            if (i === 7) pnlPctEl = td;
+            tr.appendChild(td);
+          });
+          tb.appendChild(tr);
+
+          portfolioState.rowsByIsin.set(isin, { bidEl, mvEl, pnlEl, pnlPctEl });
+        }
+        card.appendChild(table);
+        portfoliosEl.appendChild(card);
+        state.portfolios.set(pid, portfolioState);
+      }
+    }
+
+    function recomputePortfolio(pid) {
+      const pf = state.portfolios.get(pid);
+      if (!pf) return;
+      let mv = 0;
+      let cb = 0;
+      for (const [isin, pos] of pf.positions.entries()) {
+        cb += pos.entry_price * pos.quantity;
+        const bid = state.bids.get(isin);
+        if (bid !== undefined) mv += bid * pos.quantity;
+      }
+      const pnl = mv - cb;
+      pf.totalsEl.mv.textContent = fmtNum(mv);
+      pf.totalsEl.cb.textContent = fmtNum(cb);
+      pf.totalsEl.pnl.textContent = fmtNum(pnl);
+      pf.totalsEl.pnl.className = clsPnL(pnl);
+      pf.totalsEl.at.textContent = new Date().toISOString();
+    }
+
+    function applyQuoteUpdate(key, bid, watchPrice, watchField, quotetime) {
+      if (!key) return;
+      const isin = String(key);
+      if (bid !== null && bid !== undefined) state.bids.set(isin, Number(bid));
+      if (watchPrice !== null && watchPrice !== undefined) state.watchPrices.set(isin, Number(watchPrice));
+      if (watchField) state.watchFields.set(isin, String(watchField));
+      lastQuoteAtEl.textContent = (quotetime && String(quotetime).trim()) ? String(quotetime) : new Date().toLocaleTimeString();
+
+      // Watchlist update
+      const wid = state.watch.idByIsin.get(isin);
+      if (wid !== undefined) {
+        const row = state.watch.rowById.get(wid);
+        if (row) {
+          const px = state.watchPrices.get(isin);
+          const f = state.watchFields.get(isin);
+          row.bidEl.textContent = (px === undefined) ? "—" : (fmtNum(px) + (f ? ` (${f})` : ""));
+        }
+      }
+
+      const pids = state.isinsToPortfolios.get(isin);
+      if (!pids || bid === null || bid === undefined) return;
+
+      for (const pid of pids.values()) {
+        const pf = state.portfolios.get(pid);
+        if (!pf) continue;
+        const row = pf.rowsByIsin.get(isin);
+        const pos = pf.positions.get(isin);
+        if (!row || !pos) continue;
+
+        const mv = bid * pos.quantity;
+        const cb = pos.entry_price * pos.quantity;
+        const pnl = mv - cb;
+        const pnlPct = cb ? (pnl / cb) : null;
+
+        row.bidEl.textContent = fmtNum(bid);
+        row.mvEl.textContent = fmtNum(mv);
+        row.pnlEl.textContent = fmtNum(pnl);
+        row.pnlPctEl.textContent = pnlPct === null ? "—" : fmtPct(pnlPct);
+
+        row.pnlEl.className = "right " + clsPnL(pnl);
+        row.pnlPctEl.className = "right " + clsPnL(pnl);
+
+        recomputePortfolio(pid);
+      }
+    }
+
+    let ws = null;
+    function connectWs() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+      ws = new WebSocket(wsUrl);
+      streamStateEl.textContent = "connecting…";
+
+      ws.onopen = () => {
+        streamStateEl.textContent = "connected";
+        setStatus("success", "Stream verbunden. Updates kommen live.");
+      };
+      ws.onclose = () => {
+        streamStateEl.textContent = "disconnected";
+        setStatus("warn", "Stream getrennt. Reconnect in 2s…");
+        setTimeout(connectWs, 2000);
+      };
+      ws.onerror = () => {
+        streamStateEl.textContent = "error";
+      };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+
+        if (msg.type === "status") {
+          setStatus(msg.level || "info", msg.message || "");
+          return;
+        }
+
+        if (msg.type === "snapshot") {
+          renderAll(msg.valuations || []);
+          renderWatchlist(msg.watchlist || []);
+          return;
+        }
+
+        if (msg.type === "quote") {
+          applyQuoteUpdate(msg.key || msg.isin, msg.bid, msg.watch_price, msg.watch_field, msg.quotetime);
+        }
+      };
+    }
+
+    reconnectBtn.onclick = () => {
+      try { if (ws) ws.close(); } catch {}
+      connectWs();
+    };
+
+    addWatchBtn.onclick = async () => {
+      const isin = (watchIsinEl.value || "").trim().toUpperCase();
+      const label = (watchLabelEl.value || "").trim();
+      const currency = (watchCurrencyEl.value || "EUR").trim().toUpperCase();
+      if (!isin) return;
+      setStatus("info", "Füge Watchlist-Eintrag hinzu…");
+      const it = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ isin, label: label || null, currency }) });
+      // update UI: reload full watchlist to ensure bid mapping consistent
+      const list = await api("/api/watchlist");
+      renderWatchlist(list);
+      watchIsinEl.value = "";
+      watchLabelEl.value = "";
+      setStatus("success", "Watchlist-Eintrag hinzugefügt.");
+    };
+
+    // Initial snapshot + WS connect
+    Promise.all([api("/api/portfolios/valuations"), api("/api/watchlist")])
+      .then(([vals, watch]) => { renderAll(vals); renderWatchlist(watch); connectWs(); })
+      .catch(e => setStatus("error", String(e.message || e)));
+  </script>
+</body>
+</html>
