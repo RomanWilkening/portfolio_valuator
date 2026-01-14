@@ -46,7 +46,23 @@
     </div>
     <div class="row" style="margin-top: 10px;">
       <input id="newPortfolioName" placeholder="Neues Portfolio (Name)" style="min-width: 320px;" />
+      <select id="newPortfolioCurrency" title="Währung" style="min-width: 110px;">
+        <option value="EUR">EUR</option>
+        <option value="USD">USD</option>
+        <option value="CHF">CHF</option>
+        <option value="GBP">GBP</option>
+      </select>
       <button id="createPortfolioBtn">Anlegen</button>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <span class="pill">Währung (aktives Portfolio): <strong id="activeCurrency">—</strong></span>
+      <select id="activeCurrencySelect" title="Währung setzen" style="min-width: 110px;">
+        <option value="EUR">EUR</option>
+        <option value="USD">USD</option>
+        <option value="CHF">CHF</option>
+        <option value="GBP">GBP</option>
+      </select>
+      <button id="saveCurrencyBtn">Währung speichern</button>
     </div>
   </div>
 
@@ -98,6 +114,10 @@
     const deletePortfolioBtn = document.getElementById("deletePortfolioBtn");
     const newPortfolioName = document.getElementById("newPortfolioName");
     const createPortfolioBtn = document.getElementById("createPortfolioBtn");
+    const newPortfolioCurrency = document.getElementById("newPortfolioCurrency");
+    const activeCurrencyEl = document.getElementById("activeCurrency");
+    const activeCurrencySelect = document.getElementById("activeCurrencySelect");
+    const saveCurrencyBtn = document.getElementById("saveCurrencyBtn");
 
     const mqttStatusEl = document.getElementById("mqttStatus");
     const mqttToggleBtn = document.getElementById("mqttToggleBtn");
@@ -199,6 +219,8 @@
       const data = await api(`/api/portfolios/${id}`);
       currentPortfolio = data.portfolio;
       currentPositions = data.positions || [];
+      activeCurrencyEl.textContent = currentPortfolio.currency || "EUR";
+      activeCurrencySelect.value = (currentPortfolio.currency || "EUR").toUpperCase();
       renderPositions();
       setStatus("success", `Portfolio geladen: ${currentPortfolio.name} (#${currentPortfolio.id})`);
     }
@@ -206,11 +228,21 @@
     async function createPortfolio() {
       const name = (newPortfolioName.value || "").trim();
       if (!name) return;
+      const currency = (newPortfolioCurrency.value || "EUR").trim().toUpperCase();
       setStatus("info", "Lege Portfolio an…");
-      const p = await api("/api/portfolios", { method: "POST", body: JSON.stringify({ name }) });
+      const p = await api("/api/portfolios", { method: "POST", body: JSON.stringify({ name, currency }) });
       newPortfolioName.value = "";
       await loadPortfolios(p.id);
       setStatus("success", `Portfolio angelegt: ${p.name} (#${p.id})`);
+    }
+
+    async function saveCurrency() {
+      if (!currentPortfolio) return;
+      const currency = (activeCurrencySelect.value || "EUR").trim().toUpperCase();
+      setStatus("info", "Speichere Währung…");
+      await api(`/api/portfolios/${currentPortfolio.id}`, { method: "PUT", body: JSON.stringify({ currency }) });
+      await loadPortfolio(String(currentPortfolio.id));
+      setStatus("success", "Währung gespeichert.");
     }
 
     async function loadMqttStatus() {
@@ -278,6 +310,7 @@
     reloadBtn.onclick = () => loadPortfolios(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
     createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
     deletePortfolioBtn.onclick = () => deletePortfolio().catch(e => setStatus("error", String(e.message || e)));
+    saveCurrencyBtn.onclick = () => saveCurrency().catch(e => setStatus("error", String(e.message || e)));
     portfolioSelect.onchange = () => loadPortfolio(portfolioSelect.value).catch(e => setStatus("error", String(e.message || e)));
     addPosBtn.onclick = () => savePosition().catch(e => setStatus("error", String(e.message || e)));
     mqttReloadBtn.onclick = () => loadMqttStatus().catch(e => setStatus("error", String(e.message || e)));

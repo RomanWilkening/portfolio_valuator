@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from websockets.exceptions import ConnectionClosed
 
 from app.db import connect_db, init_db
-from app.mqtt_ha import HomeAssistantMqttPublisher, build_entity_payload, load_mqtt_settings
+from app.mqtt_ha import HomeAssistantMqttPublisher, load_mqtt_settings
 from app.settings import get_bool, set_bool
 
 logging.basicConfig(level=logging.INFO)
@@ -407,7 +407,7 @@ def compute_all_valuations_from_bids(bids: Dict[str, Optional[float]]) -> List[D
 
 
 def load_watchlist(conn) -> List[Dict[str, Any]]:
-    cur = conn.execute("SELECT id, label, isin FROM watchlist ORDER BY id DESC")
+    cur = conn.execute("SELECT id, label, isin, currency FROM watchlist ORDER BY id DESC")
     return [dict(r) for r in cur.fetchall()]
 
 
@@ -425,6 +425,7 @@ def compute_watchlist_from_prices(
                 "label": it.get("label"),
                 "isin": key,
                 "key": key,
+                "currency": it.get("currency") or "EUR",
                 "price": prices.get(key),
                 "field": (fields or {}).get(key),
             }
@@ -614,16 +615,9 @@ def _publish_mqtt_snapshot() -> None:
         return
     bids = stream_manager._bids_as_optional()
     watch_prices = stream_manager._watch_prices_as_optional()
-
     portfolios = compute_all_valuations_from_bids(bids)
     watchlist = compute_watchlist_from_prices(watch_prices, stream_manager.watch_fields)
-
-    state_value, attrs = build_entity_payload(
-        portfolios=portfolios,
-        watchlist=watchlist,
-        meta={"source": "stream_cache"},
-    )
-    _mqtt.publish_now(state_value, attrs)
+    _mqtt.publish_all(portfolios=portfolios, watchlist=watchlist)
 
 
 def _mqtt_is_enabled() -> bool:
@@ -757,6 +751,7 @@ def compute_valuation(
 
     return {
         "portfolio": dict(portfolio),
+        "currency": (portfolio or {}).get("currency") or "EUR",
         "valued_at": valued_at,
         "positions": out_positions,
         "totals": {
@@ -774,6 +769,7 @@ def compute_valuation(
 
 class PortfolioCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+    currency: str = Field(default="EUR", min_length=3, max_length=8)
 
 
 class PositionIn(BaseModel):
@@ -797,6 +793,12 @@ class PositionOut(BaseModel):
 class WatchItemCreate(BaseModel):
     isin: str
     label: Optional[str] = Field(default=None, max_length=200)
+    currency: str = Field(default="EUR", min_length=3, max_length=8)
+
+
+class PortfolioUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
 
 
 # ----------------- FastAPI App -----------------
@@ -844,7 +846,7 @@ async def manage():
 async def list_portfolios() -> List[Dict[str, Any]]:
     cur = _conn.execute(
         """
-        SELECT p.id, p.name, COUNT(pos.id) AS positions_count
+        SELECT p.id, p.name, p.currency, COUNT(pos.id) AS positions_count
         FROM portfolios p
         LEFT JOIN positions pos ON pos.portfolio_id = p.id
         GROUP BY p.id
@@ -856,7 +858,10 @@ async def list_portfolios() -> List[Dict[str, Any]]:
 
 @app.post("/api/portfolios", status_code=201)
 async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
-    cur = _conn.execute("INSERT INTO portfolios(name) VALUES (?)", (body.name.strip(),))
+    cur = _conn.execute(
+        "INSERT INTO portfolios(name, currency) VALUES (?, ?)",
+        (body.name.strip(), (body.currency or "EUR").strip().upper()),
+    )
     _conn.commit()
     stream_manager.mark_dirty()
     _publish_mqtt_snapshot()
@@ -872,15 +877,16 @@ async def list_watchlist() -> List[Dict[str, Any]]:
 async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
     isin = validate_watch_code(body.isin)
     label = (body.label or "").strip() or None
+    currency = (body.currency or "EUR").strip().upper()
     try:
-        cur = _conn.execute("INSERT INTO watchlist(isin, label) VALUES (?,?)", (isin, label))
+        cur = _conn.execute("INSERT INTO watchlist(isin, label, currency) VALUES (?,?,?)", (isin, label, currency))
         _conn.commit()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Watchlist-Eintrag konnte nicht gespeichert werden: {e}")
 
     stream_manager.mark_dirty()
     _publish_mqtt_snapshot()
-    return {"id": int(cur.lastrowid), "isin": isin, "label": label}
+    return {"id": int(cur.lastrowid), "isin": isin, "label": label, "currency": currency}
 
 
 @app.delete("/api/watchlist/{item_id}", status_code=204)
@@ -940,7 +946,7 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
 
 @app.get("/api/portfolios/{portfolio_id}")
 async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
-    cur = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,))
+    cur = _conn.execute("SELECT id, name, currency FROM portfolios WHERE id=?", (portfolio_id,))
     row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
@@ -950,6 +956,31 @@ async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
         (portfolio_id,),
     )
     return {"portfolio": dict(row), "positions": [dict(r) for r in cur2.fetchall()]}
+
+
+@app.put("/api/portfolios/{portfolio_id}")
+async def update_portfolio(portfolio_id: int, body: PortfolioUpdate) -> Dict[str, Any]:
+    cur = _conn.execute("SELECT id FROM portfolios WHERE id=?", (portfolio_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+
+    fields: List[str] = []
+    values: List[Any] = []
+    if body.name is not None:
+        fields.append("name=?")
+        values.append(body.name.strip())
+    if body.currency is not None:
+        fields.append("currency=?")
+        values.append(body.currency.strip().upper())
+
+    if fields:
+        values.append(portfolio_id)
+        _conn.execute(f"UPDATE portfolios SET {', '.join(fields)} WHERE id=?", tuple(values))
+        _conn.commit()
+        stream_manager.mark_dirty()
+        _publish_mqtt_snapshot()
+
+    return await get_portfolio(portfolio_id)
 
 
 @app.put("/api/portfolios/{portfolio_id}/positions")
@@ -1049,9 +1080,6 @@ async def mqtt_status() -> Dict[str, Any]:
         "connected": bool(_mqtt),
         "host": s.host,
         "port": s.port,
-        "discovery_topic": s.discovery_topic,
-        "state_topic": s.state_topic,
-        "attributes_topic": s.attributes_topic,
         "availability_topic": s.availability_topic,
     }
 

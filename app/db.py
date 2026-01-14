@@ -28,6 +28,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS portfolios (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
+          currency TEXT NOT NULL DEFAULT 'EUR',
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
 
@@ -46,6 +47,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           label TEXT,
           isin TEXT NOT NULL UNIQUE,
+          currency TEXT NOT NULL DEFAULT 'EUR',
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
 
@@ -55,4 +57,17 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Minimal-"Migrationen" für bestehende DBs (ALTER TABLE wenn Spalte fehlt)
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(portfolios)").fetchall()}
+        if "currency" not in cols:
+            conn.execute("ALTER TABLE portfolios ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR';")
+    except Exception:
+        pass
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)").fetchall()}
+        if "currency" not in cols:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR';")
+    except Exception:
+        pass
     conn.commit()
