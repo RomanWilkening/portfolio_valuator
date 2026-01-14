@@ -62,7 +62,8 @@ def load_mqtt_settings() -> MqttSettings:
         base_topic=base_topic,
         qos=int(os.getenv("MQTT_QOS", "0")),
         retain=_env_bool("MQTT_RETAIN", default=True),
-        debounce_ms=int(os.getenv("MQTT_DEBOUNCE_MS", "1000")),
+        # Default 0 => publish every push (no debounce)
+        debounce_ms=int(os.getenv("MQTT_DEBOUNCE_MS", "0")),
     )
 
 
@@ -241,17 +242,18 @@ class HomeAssistantMqttPublisher:
             if pid is None:
                 continue
 
+            pf_name = (pfo.get("name") or str(pid)).strip()
             base = f"portfolio_{pid}"
-            add_sensor(f"{base}_wert", f"{pid} Wert", round(float(mv or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio"})
-            add_sensor(f"{base}_basis", f"{pid} Basis", round(float(cb or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio"})
-            add_sensor(f"{base}_performance", f"{pid} Performance", round(float(pnl or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio"})
+            add_sensor(f"{base}_wert", f"{pf_name} Wert", round(float(mv or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency})
+            add_sensor(f"{base}_basis", f"{pf_name} Basis", round(float(cb or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency})
+            add_sensor(f"{base}_performance", f"{pf_name} Performance", round(float(pnl or 0.0), 2), currency, "monetary", {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency})
             add_sensor(
                 f"{base}_performance_pct",
-                f"{pid} Performance%",
+                f"{pf_name} Performance%",
                 round(float((pnl_pct or 0.0) * 100.0), 2),
                 "%",
                 None,
-                {"id": pid, "type": "portfolio"},
+                {"id": pid, "type": "portfolio", "name": pf_name, "currency": currency},
             )
 
             for pos in (pf or {}).get("positions") or []:
@@ -267,15 +269,17 @@ class HomeAssistantMqttPublisher:
                 p_pnl_pct = pos.get("pnl_pct")
                 pos_currency = (pos.get("currency") or currency or "EUR").strip().upper()
 
-                pbase = f"position_{pos_id}"
-                add_sensor(f"{pbase}_stueck", f"{pos_id} Stück", round(float(qty or 0.0), 2), "stk", None, {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid})
-                add_sensor(f"{pbase}_kurs", f"{pos_id} Kurs", round(float(bid or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_basis", f"{pos_id} Basis", round(float(cost_basis or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_wert", f"{pos_id} Wert", round(float(market_value or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
-                add_sensor(f"{pbase}_performance", f"{pos_id} Performance", round(float(p_pnl or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin, "portfolio_id": pid, "currency": pos_currency})
+                isin_s = (isin or str(pos_id) or "").strip()
+                # object_id muss eindeutig sein, daher Portfolio-ID anhängen (gleiche ISIN kann in mehreren Portfolios vorkommen)
+                pbase = f"{isin_s}_p{pid}"
+                add_sensor(f"{pbase}_stueck", f"{isin_s} Stück", round(float(qty or 0.0), 2), "stk", None, {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_kurs", f"{isin_s} Kurs", round(float(bid or 0.0), 4), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_basis", f"{isin_s} Basis", round(float(cost_basis or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_wert", f"{isin_s} Wert", round(float(market_value or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
+                add_sensor(f"{pbase}_performance", f"{isin_s} Performance", round(float(p_pnl or 0.0), 2), pos_currency, "monetary", {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency})
                 add_sensor(
                     f"{pbase}_performance_pct",
-                    f"{pos_id} Performance%",
+                    f"{isin_s} Performance%",
                     round(float((p_pnl_pct or 0.0) * 100.0), 2),
                     "%",
                     None,
@@ -292,12 +296,13 @@ class HomeAssistantMqttPublisher:
             currency = (w.get("currency") or "EUR").strip().upper()
             price = w.get("price")
             field = w.get("field")
+            key_s = (key or str(wid)).strip()
             # Währung im Sensor-Titel, damit es in HA eindeutig ist
-            name = f"{wid} Kurs {currency}" + (f" ({label})" if label else f" ({key})")
+            name = f"{key_s} Kurs {currency}" + (f" ({label})" if label else "")
             add_sensor(
-                f"watchlist_{wid}_kurs",
+                f"watch_{key_s}_kurs",
                 name,
-                round(float(price or 0.0), 2),
+                round(float(price or 0.0), 4),
                 currency,
                 "monetary",
                 {"id": wid, "type": "watchlist", "key": key, "label": label, "field": field},
