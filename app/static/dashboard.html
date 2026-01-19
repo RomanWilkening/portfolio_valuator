@@ -393,6 +393,7 @@
               <th>Position</th>
               <th class="num">Menge</th>
               <th class="num">Entry</th>
+              <th>Waehrung</th>
               <th class="num">Preis</th>
               <th class="num">Market Value</th>
               <th class="num">Cost Basis</th>
@@ -424,12 +425,14 @@
           const positionCurrency = (p.position_currency || p.currency || "EUR").toUpperCase();
           const portfolioCurrency = (v.currency || p.currency || "EUR").toUpperCase();
           const fxInstrumentCode = p.fx_instrument_code || null;
+          const fxInverted = !!p.fx_inverted;
           portfolioState.positions.set(code, {
             quantity: Number(p.quantity),
             entry_price: Number(p.entry_price),
             position_currency: positionCurrency,
             portfolio_currency: portfolioCurrency,
             fx_instrument_code: fxInstrumentCode,
+            fx_inverted: fxInverted,
           });
           if (!state.codesToPortfolios.has(code)) state.codesToPortfolios.set(code, new Set());
           state.codesToPortfolios.get(code).add(pid);
@@ -440,7 +443,9 @@
           if (initialPrice !== null) state.prices.set(code, initialPrice);
           if (p.price_source) state.priceSources.set(code, String(p.price_source));
           if (fxInstrumentCode && p.fx_rate !== null && p.fx_rate !== undefined) {
-            state.fxRates.set(fxInstrumentCode, Number(p.fx_rate));
+            const fxRate = Number(p.fx_rate);
+            const rawRate = fxInverted && fxRate ? (1 / fxRate) : fxRate;
+            state.fxRates.set(fxInstrumentCode, rawRate);
           }
           if (fxInstrumentCode) {
             if (!state.fxDependents.has(fxInstrumentCode)) state.fxDependents.set(fxInstrumentCode, new Set());
@@ -469,6 +474,9 @@
           const tdEntry = document.createElement("td");
           tdEntry.className = "num";
           tdEntry.textContent = fmtNum(p.entry_price);
+
+          const tdCurr = document.createElement("td");
+          tdCurr.textContent = positionCurrency;
 
           const tdBid = document.createElement("td");
           tdBid.className = "num";
@@ -500,6 +508,7 @@
           tr.appendChild(tdPos);
           tr.appendChild(tdQty);
           tr.appendChild(tdEntry);
+          tr.appendChild(tdCurr);
           tr.appendChild(tdBid);
           tr.appendChild(tdMv);
           tr.appendChild(tdCb);
@@ -522,20 +531,29 @@
       }
       const mvLocal = price * pos.quantity;
       const cbLocal = pos.entry_price * pos.quantity;
-      if (pos.position_currency !== pos.portfolio_currency) {
-        const fxRate = pos.fx_instrument_code ? state.fxRates.get(pos.fx_instrument_code) : null;
-        if (!fxRate) {
-          return { mv: null, cb: null, pnl: null, pnlPct: null };
-        }
-        const mv = mvLocal * fxRate;
-        const cb = cbLocal * fxRate;
-        const pnl = mv - cb;
-        const pnlPct = cb ? (pnl / cb) : null;
-        return { mv, cb, pnl, pnlPct };
-      }
       const pnl = mvLocal - cbLocal;
       const pnlPct = cbLocal ? (pnl / cbLocal) : null;
       return { mv: mvLocal, cb: cbLocal, pnl, pnlPct };
+    }
+
+    function calcPortfolioMetrics(pos, price) {
+      if (price === null || price === undefined) {
+        return { mv: null, cb: null };
+      }
+      const mvLocal = price * pos.quantity;
+      const cbLocal = pos.entry_price * pos.quantity;
+      if (pos.position_currency === pos.portfolio_currency) {
+        return { mv: mvLocal, cb: cbLocal };
+      }
+      if (!pos.fx_instrument_code) {
+        return { mv: null, cb: null };
+      }
+      const rawRate = state.fxRates.get(pos.fx_instrument_code);
+      if (!rawRate) {
+        return { mv: null, cb: null };
+      }
+      const fxRate = pos.fx_inverted && rawRate ? (1 / rawRate) : rawRate;
+      return { mv: mvLocal * fxRate, cb: cbLocal * fxRate };
     }
 
     function updatePositionRow(pid, code) {
@@ -562,7 +580,7 @@
       let cb = 0;
       for (const [code, pos] of pf.positions.entries()) {
         const price = state.prices.get(code);
-        const metrics = calcPositionMetrics(pos, price);
+        const metrics = calcPortfolioMetrics(pos, price);
         if (metrics.mv !== null) mv += metrics.mv;
         if (metrics.cb !== null) cb += metrics.cb;
       }
@@ -698,14 +716,12 @@
       setStatus("success", "Watchlist-Eintrag hinzugefuegt.");
     };
 
-    Promise.all([api("/api/instruments"), api("/api/portfolios/valuations"), api("/api/watchlist")])
-      .then(([instruments, vals, watch]) => {
+    Promise.all([api("/api/instruments"), api("/api/fx-rates"), api("/api/portfolios/valuations"), api("/api/watchlist")])
+      .then(([instruments, fxRates, vals, watch]) => {
         state.instruments = instruments || [];
         state.fxInstruments.clear();
-        for (const inst of state.instruments) {
-          if ((inst.type || "asset") === "fx" && inst.code) {
-            state.fxInstruments.set(inst.code, inst);
-          }
+        for (const fx of (fxRates || [])) {
+          if (fx.code) state.fxInstruments.set(fx.code, fx);
         }
         renderInstrumentSelect(watchInstrumentEl, state.instruments);
         renderAll(vals);
