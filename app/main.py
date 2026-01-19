@@ -391,7 +391,7 @@ class LightstreamerSession:
         def pick_valuation_price() -> tuple[Optional[float], Optional[str]]:
             if _valid_price(bid):
                 return bid, "bid"
-            if bid is not None and ask is not None and ask != 0.0:
+            if bid is not None and ask is not None and bid != 0.0 and ask != 0.0:
                 return (bid + ask) / 2.0, "mid"
             if _valid_price(reference):
                 return reference, "reference"
@@ -508,6 +508,13 @@ def load_watchlist(conn) -> List[Dict[str, Any]]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def load_fx_rates(conn) -> List[Dict[str, Any]]:
+    cur = conn.execute(
+        "SELECT id, code, name, base_currency, quote_currency, isin, ls_item FROM fx_rates ORDER BY id DESC"
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def load_stream_instruments(conn) -> List[Dict[str, Any]]:
     cur = conn.execute(
         """
@@ -601,6 +608,28 @@ def compute_watchlist_from_prices(
     return out
 
 
+def compute_fx_rates_from_prices(
+    prices: Dict[str, Optional[float]],
+    sources: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    items = load_fx_rates(_conn)
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        code = it.get("code")
+        out.append(
+            {
+                "id": it.get("id"),
+                "code": code,
+                "name": it.get("name"),
+                "base_currency": it.get("base_currency"),
+                "quote_currency": it.get("quote_currency"),
+                "price": prices.get(code),
+                "price_source": (sources or {}).get(code),
+            }
+        )
+    return out
+
+
 class StreamManager:
     def __init__(self) -> None:
         self.clients: Set[WebSocket] = set()
@@ -689,6 +718,10 @@ class StreamManager:
                 "valuations": compute_all_valuations_from_prices(
                     prices,
                     bids,
+                    self.quote_router.best_price_source,
+                ),
+                "fx_rates": compute_fx_rates_from_prices(
+                    prices,
                     self.quote_router.best_price_source,
                 ),
                 "watchlist": compute_watchlist_from_prices(
@@ -793,6 +826,10 @@ class StreamManager:
                             "valuations": compute_all_valuations_from_prices(
                                 prices,
                                 bids,
+                                self.quote_router.best_price_source,
+                            ),
+                            "fx_rates": compute_fx_rates_from_prices(
+                                prices,
                                 self.quote_router.best_price_source,
                             ),
                             "watchlist": compute_watchlist_from_prices(
@@ -919,6 +956,10 @@ class StreamManager:
                         "valuations": compute_all_valuations_from_prices(
                             prices,
                             bids,
+                            self.quote_router.best_price_source,
+                        ),
+                        "fx_rates": compute_fx_rates_from_prices(
+                            prices,
                             self.quote_router.best_price_source,
                         ),
                         "watchlist": compute_watchlist_from_prices(
