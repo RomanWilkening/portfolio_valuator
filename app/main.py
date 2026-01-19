@@ -101,28 +101,33 @@ def validate_isin(isin: str) -> str:
     return isin
 
 
-def validate_watch_code(code: str) -> str:
-    """
-    Watchlist kann entweder eine ISIN (12 Zeichen) ODER ein BNP/Lightstreamer Item (z.B. X0000080800586) sein.
-    """
-    code = (code or "").strip().upper()
-    if re.fullmatch(r"[A-Z0-9]{12}", code):
-        return code
-    if re.fullmatch(r"X[0-9A-Z]{6,32}", code):
-        return code
-    raise ValueError("Ungültiger Watchlist-Code. Erlaubt: ISIN (12 Zeichen) oder BNP Item-ID (z.B. X0000080800586).")
+def is_ls_item(code: str) -> bool:
+    return bool(re.fullmatch(r"X[0-9A-Z]{6,32}", (code or "").strip().upper()))
 
 
-def code_to_ls_item(code: str) -> str:
-    """
-    Mappt einen Watch-/ISIN-Code auf Lightstreamer LS_group Item:
-    - Wenn bereits X... => direkt verwenden
-    - Sonst ISIN => über Template zu X0000010800<ISIN>
-    """
-    code = validate_watch_code(code)
-    if code.startswith("X"):
+def instrument_to_ls_item(instr: Dict[str, Any]) -> Optional[str]:
+    ls_item = (instr.get("ls_item") or "").strip()
+    if ls_item:
+        return ls_item
+    isin = (instr.get("isin") or "").strip().upper()
+    if is_isin(isin):
+        return isin_to_item(isin)
+    code = (instr.get("code") or instr.get("instrument_code") or "").strip().upper()
+    if is_isin(code):
+        return isin_to_item(code)
+    if is_ls_item(code):
         return code
-    return isin_to_item(code)
+    return None
+
+
+def instrument_to_tradegate_isin(instr: Dict[str, Any]) -> Optional[str]:
+    isin = (instr.get("isin") or "").strip().upper()
+    if is_isin(isin):
+        return isin
+    code = (instr.get("code") or instr.get("instrument_code") or "").strip().upper()
+    if is_isin(code):
+        return code
+    return None
 
 
 def isin_to_item(isin: str) -> str:
@@ -397,29 +402,42 @@ class LightstreamerSession:
 
 
 def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dict]], list[str]]:
-    cur = conn.execute("SELECT id, name FROM portfolios ORDER BY id DESC")
+    cur = conn.execute("SELECT id, name, currency FROM portfolios ORDER BY id DESC")
     portfolios = [dict(r) for r in cur.fetchall()]
     cur2 = conn.execute(
         """
-        SELECT id, portfolio_id, isin, quantity, entry_price
-        FROM positions
-        ORDER BY portfolio_id DESC, id ASC
+        SELECT
+            pos.id,
+            pos.portfolio_id,
+            pos.instrument_id,
+            pos.name AS position_name,
+            pos.quantity,
+            pos.entry_price,
+            pos.currency AS position_currency,
+            instr.code AS instrument_code,
+            instr.name AS instrument_name,
+            instr.currency AS instrument_currency,
+            instr.isin AS instrument_isin,
+            instr.ls_item AS instrument_ls_item
+        FROM positions pos
+        JOIN instruments instr ON instr.id = pos.instrument_id
+        ORDER BY pos.portfolio_id DESC, pos.id ASC
         """
     )
     positions_all = [dict(r) for r in cur2.fetchall()]
 
     by_portfolio: Dict[int, List[Dict[str, Any]]] = {}
-    all_isins: List[str] = []
+    all_codes: List[str] = []
     seen: set[str] = set()
     for p in positions_all:
         pid = int(p["portfolio_id"])
         by_portfolio.setdefault(pid, []).append(p)
-        isin = p["isin"]
-        if isin not in seen:
-            seen.add(isin)
-            all_isins.append(isin)
+        code = p["instrument_code"]
+        if code not in seen:
+            seen.add(code)
+            all_codes.append(code)
 
-    return portfolios, by_portfolio, all_isins
+    return portfolios, by_portfolio, all_codes
 
 
 def compute_all_valuations_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
@@ -433,7 +451,39 @@ def compute_all_valuations_from_bids(bids: Dict[str, Optional[float]]) -> List[D
 
 
 def load_watchlist(conn) -> List[Dict[str, Any]]:
-    cur = conn.execute("SELECT id, label, isin, currency FROM watchlist ORDER BY id DESC")
+    cur = conn.execute(
+        """
+        SELECT
+            w.id,
+            w.label,
+            w.instrument_id,
+            w.currency,
+            instr.code AS instrument_code,
+            instr.name AS instrument_name,
+            instr.currency AS instrument_currency,
+            instr.isin AS instrument_isin,
+            instr.ls_item AS instrument_ls_item
+        FROM watchlist w
+        JOIN instruments instr ON instr.id = w.instrument_id
+        ORDER BY w.id DESC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_stream_instruments(conn) -> List[Dict[str, Any]]:
+    cur = conn.execute(
+        """
+        SELECT id, code, name, currency, isin, ls_item
+        FROM instruments
+        WHERE id IN (
+            SELECT instrument_id FROM positions
+            UNION
+            SELECT instrument_id FROM watchlist
+        )
+        ORDER BY id DESC
+        """
+    )
     return [dict(r) for r in cur.fetchall()]
 
 
@@ -444,14 +494,16 @@ def compute_watchlist_from_prices(
     items = load_watchlist(_conn)
     out: List[Dict[str, Any]] = []
     for it in items:
-        key = it["isin"]
+        key = it["instrument_code"]
         out.append(
             {
                 "id": it["id"],
                 "label": it.get("label"),
-                "isin": key,
+                "instrument_id": it.get("instrument_id"),
+                "instrument_code": key,
+                "instrument_name": it.get("instrument_name"),
                 "key": key,
-                "currency": it.get("currency") or "EUR",
+                "currency": it.get("currency") or it.get("instrument_currency") or "EUR",
                 "price": prices.get(key),
                 "field": (fields or {}).get(key),
             }
@@ -469,6 +521,7 @@ class StreamManager:
         self.quote_router = QuoteRouter(QUOTE_SOURCE_PRIORITY)
         self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.priority
         self.tradegate_poller: Optional[TradegatePoller] = None
+        self.instrument_by_code: Dict[str, Dict[str, Any]] = {}
         if SOURCE_TRADEGATE in self.quote_router.priority:
             self.tradegate_poller = TradegatePoller(
                 settings=TRADEGATE_SETTINGS,
@@ -505,11 +558,15 @@ class StreamManager:
         watch_field = self.quote_router.best_watch_fields.get(key)
         bid_source = self.quote_router.best_bid_source.get(key)
         watch_source = self.quote_router.best_watch_source.get(key)
+        instrument = self.instrument_by_code.get(key, {})
         await self.broadcast(
             {
                 "type": "quote",
                 "key": key,
                 "isin": isin or key,
+                "instrument_id": instrument.get("id"),
+                "instrument_code": key,
+                "instrument_name": instrument.get("name") or instrument.get("instrument_name"),
                 "symbol": symbol,
                 "bid": bid,
                 "bid_source": bid_source,
@@ -572,30 +629,31 @@ class StreamManager:
                 if self.tradegate_poller:
                     self.tradegate_poller.set_enabled(need_stream)
                     if not need_stream:
-                        self.tradegate_poller.set_keys(set())
+                        self.tradegate_poller.set_mapping({})
                 if not need_stream:
                     last_items = []
                     await asyncio.sleep(0.5)
                     continue
 
-                portfolios, by_portfolio, portfolio_isins = _load_portfolios_and_positions(_conn)
-                watch = load_watchlist(_conn)
-                watch_codes = [w["isin"] for w in watch]
+                instruments = load_stream_instruments(_conn)
+                self.instrument_by_code = {i["code"]: i for i in instruments if i.get("code")}
 
-                # Targets: (ls_item, key). key bleibt stabil fürs Frontend (ISIN oder X...).
+                # Targets: (ls_item, key). key bleibt stabil fürs Frontend (Instrument-Code).
                 targets: List[tuple[str, str]] = []
                 seen_keys: set[str] = set()
+                tradegate_map: Dict[str, str] = {}
 
-                for isin in portfolio_isins:
-                    if isin not in seen_keys:
-                        seen_keys.add(isin)
-                        targets.append((isin_to_item(isin), isin))
-
-                for code in watch_codes:
-                    code = validate_watch_code(code)
-                    if code not in seen_keys:
-                        seen_keys.add(code)
-                        targets.append((code_to_ls_item(code), code))
+                for instr in instruments:
+                    code = (instr.get("code") or "").strip()
+                    if not code or code in seen_keys:
+                        continue
+                    seen_keys.add(code)
+                    ls_item = instrument_to_ls_item(instr)
+                    if ls_item:
+                        targets.append((ls_item, code))
+                    tg_isin = instrument_to_tradegate_isin(instr)
+                    if tg_isin:
+                        tradegate_map[code] = tg_isin
 
                 items = [t[0] for t in targets]
                 idx_to_key = {idx + 1: t[1] for idx, t in enumerate(targets)}
@@ -608,17 +666,10 @@ class StreamManager:
                 # reset dirty
                 self._dirty.clear()
                 last_items = items
-                all_keys = [t[1] for t in targets]
+                all_keys = list(seen_keys)
                 self.quote_router.trim_keys(all_keys)
                 if self.tradegate_poller:
-                    tradegate_isins: set[str] = set()
-                    for isin in portfolio_isins:
-                        if is_isin(isin):
-                            tradegate_isins.add(isin)
-                    for code in watch_codes:
-                        if is_isin(code):
-                            tradegate_isins.add(code)
-                    self.tradegate_poller.set_keys(tradegate_isins)
+                    self.tradegate_poller.set_mapping(tradegate_map)
 
                 if not self.lightstreamer_enabled:
                     if not items:
@@ -883,10 +934,11 @@ def compute_valuation(
     total_cb = 0.0
 
     for p in positions:
-        isin = p["isin"]
+        code = p.get("instrument_code") or p.get("isin")
         qty = float(p["quantity"])
         entry = float(p["entry_price"])
-        bid = bids.get(isin)
+        bid = bids.get(code)
+        pos_currency = (p.get("position_currency") or p.get("currency") or p.get("instrument_currency") or "EUR").strip().upper()
 
         cost_basis = entry * qty
         market_value = (bid * qty) if bid is not None else None
@@ -900,7 +952,12 @@ def compute_valuation(
         out_positions.append(
             {
                 "id": p.get("id"),
-                "isin": isin,
+                "name": (p.get("position_name") or "").strip() or None,
+                "instrument_id": p.get("instrument_id"),
+                "instrument_code": code,
+                "instrument_name": p.get("instrument_name"),
+                "instrument_isin": p.get("instrument_isin"),
+                "instrument_ls_item": p.get("instrument_ls_item"),
                 "quantity": qty,
                 "entry_price": entry,
                 "bid": bid,
@@ -908,6 +965,7 @@ def compute_valuation(
                 "cost_basis": cost_basis,
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
+                "currency": pos_currency,
             }
         )
 
@@ -937,8 +995,25 @@ class PortfolioCreate(BaseModel):
     currency: str = Field(default="EUR", min_length=3, max_length=8)
 
 
+class InstrumentCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=200)
+    currency: str = Field(default="EUR", min_length=3, max_length=8)
+    isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
+    ls_item: Optional[str] = Field(default=None, max_length=64)
+
+
+class InstrumentUpdate(BaseModel):
+    code: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
+    isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
+    ls_item: Optional[str] = Field(default=None, max_length=64)
+
+
 class PositionIn(BaseModel):
-    isin: str
+    instrument_id: int
+    name: Optional[str] = Field(default=None, max_length=200)
     quantity: float = Field(gt=0)
     entry_price: float = Field(gt=0)
     currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
@@ -949,17 +1024,16 @@ class PortfolioOut(BaseModel):
     name: str
 
 
-class PositionOut(BaseModel):
-    id: int
-    isin: str
-    quantity: float
-    entry_price: float
-
-
 class WatchItemCreate(BaseModel):
-    isin: str
+    instrument_id: int
     label: Optional[str] = Field(default=None, max_length=200)
-    currency: str = Field(default="EUR", min_length=3, max_length=8)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
+
+
+class WatchItemUpdate(BaseModel):
+    instrument_id: Optional[int] = None
+    label: Optional[str] = Field(default=None, max_length=200)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
 
 
 class PortfolioUpdate(BaseModel):
@@ -975,6 +1049,28 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 _conn = connect_db()
 init_db(_conn)
+
+
+def _normalize_code(code: str) -> str:
+    code = (code or "").strip()
+    if is_isin(code) or is_ls_item(code):
+        return code.upper()
+    return code
+
+
+def _normalize_currency(value: Optional[str], default: str = "EUR") -> str:
+    return (value or default).strip().upper()
+
+
+def _get_instrument(instrument_id: int) -> Dict[str, Any]:
+    cur = _conn.execute(
+        "SELECT id, code, name, currency, isin, ls_item FROM instruments WHERE id=?",
+        (instrument_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Instrument nicht gefunden")
+    return dict(row)
 
 @app.on_event("startup")
 async def _startup() -> None:
@@ -1010,6 +1106,118 @@ async def manage():
     return FileResponse("app/static/manage.html")
 
 
+@app.get("/api/instruments")
+async def list_instruments() -> List[Dict[str, Any]]:
+    cur = _conn.execute(
+        "SELECT id, code, name, currency, isin, ls_item FROM instruments ORDER BY id DESC"
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+@app.post("/api/instruments", status_code=201)
+async def create_instrument(body: InstrumentCreate) -> Dict[str, Any]:
+    code = _normalize_code(body.code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Instrument-Code darf nicht leer sein")
+    name = (body.name or code).strip() or code
+    currency = _normalize_currency(body.currency)
+    isin = None
+    if body.isin:
+        isin = validate_isin(body.isin)
+    elif is_isin(code):
+        isin = code.upper()
+    ls_item = (body.ls_item or "").strip()
+    if not ls_item and is_ls_item(code):
+        ls_item = code
+    if ls_item:
+        ls_item = ls_item.strip()
+    try:
+        cur = _conn.execute(
+            "INSERT INTO instruments(code, name, currency, isin, ls_item) VALUES (?,?,?,?,?)",
+            (code, name, currency, isin, ls_item or None),
+        )
+        _conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Instrument konnte nicht gespeichert werden: {e}")
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return _get_instrument(int(cur.lastrowid))
+
+
+@app.put("/api/instruments/{instrument_id}")
+async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[str, Any]:
+    instrument = _get_instrument(instrument_id)
+    fields: List[str] = []
+    values: List[Any] = []
+    new_code = instrument["code"]
+    if body.code is not None:
+        code = _normalize_code(body.code)
+        if not code:
+            raise HTTPException(status_code=400, detail="Instrument-Code darf nicht leer sein")
+        new_code = code
+        if code != instrument["code"]:
+            conflict = _conn.execute(
+                "SELECT 1 FROM watchlist WHERE isin=? AND instrument_id<>?",
+                (code, instrument_id),
+            ).fetchone()
+            if conflict:
+                raise HTTPException(status_code=400, detail="Instrument-Code kollidiert mit Watchlist-Eintrag")
+        fields.append("code=?")
+        values.append(code)
+    if body.name is not None:
+        fields.append("name=?")
+        values.append((body.name or "").strip() or new_code)
+    if body.currency is not None:
+        fields.append("currency=?")
+        values.append(_normalize_currency(body.currency))
+    if body.isin is not None:
+        if body.isin:
+            fields.append("isin=?")
+            values.append(validate_isin(body.isin))
+        else:
+            fields.append("isin=?")
+            values.append(None)
+    if body.ls_item is not None:
+        ls_item = (body.ls_item or "").strip()
+        fields.append("ls_item=?")
+        values.append(ls_item or None)
+
+    if fields:
+        values.append(instrument_id)
+        try:
+            _conn.execute(f"UPDATE instruments SET {', '.join(fields)} WHERE id=?", tuple(values))
+            if new_code != instrument["code"]:
+                _conn.execute("UPDATE positions SET isin=? WHERE instrument_id=?", (new_code, instrument_id))
+                _conn.execute("UPDATE watchlist SET isin=? WHERE instrument_id=?", (new_code, instrument_id))
+            _conn.commit()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Instrument konnte nicht aktualisiert werden: {e}")
+        stream_manager.mark_dirty()
+        _publish_mqtt_snapshot()
+
+    return _get_instrument(instrument_id)
+
+
+@app.delete("/api/instruments/{instrument_id}", status_code=204)
+async def delete_instrument(instrument_id: int) -> None:
+    _get_instrument(instrument_id)
+    used_positions = _conn.execute(
+        "SELECT 1 FROM positions WHERE instrument_id=? LIMIT 1", (instrument_id,)
+    ).fetchone()
+    if used_positions:
+        raise HTTPException(status_code=400, detail="Instrument wird in Positionen verwendet")
+    used_watchlist = _conn.execute(
+        "SELECT 1 FROM watchlist WHERE instrument_id=? LIMIT 1", (instrument_id,)
+    ).fetchone()
+    if used_watchlist:
+        raise HTTPException(status_code=400, detail="Instrument ist in der Watchlist")
+    _conn.execute("DELETE FROM instruments WHERE id=?", (instrument_id,))
+    _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return None
+
+
 @app.get("/api/portfolios")
 async def list_portfolios() -> List[Dict[str, Any]]:
     cur = _conn.execute(
@@ -1043,18 +1251,55 @@ async def list_watchlist() -> List[Dict[str, Any]]:
 
 @app.post("/api/watchlist", status_code=201)
 async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
-    isin = validate_watch_code(body.isin)
+    instrument = _get_instrument(body.instrument_id)
     label = (body.label or "").strip() or None
-    currency = (body.currency or "EUR").strip().upper()
+    currency = _normalize_currency(body.currency, default=instrument.get("currency") or "EUR")
     try:
-        cur = _conn.execute("INSERT INTO watchlist(isin, label, currency) VALUES (?,?,?)", (isin, label, currency))
+        cur = _conn.execute(
+            "INSERT INTO watchlist(instrument_id, isin, label, currency) VALUES (?,?,?,?)",
+            (instrument["id"], instrument["code"], label, currency),
+        )
         _conn.commit()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Watchlist-Eintrag konnte nicht gespeichert werden: {e}")
 
     stream_manager.mark_dirty()
     _publish_mqtt_snapshot()
-    return {"id": int(cur.lastrowid), "isin": isin, "label": label, "currency": currency}
+    return [w for w in load_watchlist(_conn) if int(w["id"]) == int(cur.lastrowid)][0]
+
+
+@app.put("/api/watchlist/{item_id}")
+async def update_watchlist_item(item_id: int, body: WatchItemUpdate) -> Dict[str, Any]:
+    row = _conn.execute("SELECT id, instrument_id FROM watchlist WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Watchlist-Eintrag nicht gefunden")
+    fields: List[str] = []
+    values: List[Any] = []
+    instrument = None
+    if body.instrument_id is not None:
+        instrument = _get_instrument(body.instrument_id)
+        fields.append("instrument_id=?")
+        values.append(instrument["id"])
+        fields.append("isin=?")
+        values.append(instrument["code"])
+    if body.label is not None:
+        label = (body.label or "").strip() or None
+        fields.append("label=?")
+        values.append(label)
+    if body.currency is not None:
+        fallback = instrument.get("currency") if instrument else "EUR"
+        fields.append("currency=?")
+        values.append(_normalize_currency(body.currency, default=fallback))
+    if fields:
+        values.append(item_id)
+        try:
+            _conn.execute(f"UPDATE watchlist SET {', '.join(fields)} WHERE id=?", tuple(values))
+            _conn.commit()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Watchlist-Eintrag konnte nicht aktualisiert werden: {e}")
+        stream_manager.mark_dirty()
+        _publish_mqtt_snapshot()
+    return [w for w in load_watchlist(_conn) if int(w["id"]) == int(item_id)][0]
 
 
 @app.delete("/api/watchlist/{item_id}", status_code=204)
@@ -1073,30 +1318,9 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
     Wichtig: Wir holen alle Bid-Quotes gesammelt in *einer* Lightstreamer-Session,
     um die Bewertung kontinuierlich (Polling) effizient zu halten.
     """
-    cur = _conn.execute("SELECT id, name FROM portfolios ORDER BY id DESC")
-    portfolios = [dict(r) for r in cur.fetchall()]
+    portfolios, by_portfolio, _ = _load_portfolios_and_positions(_conn)
     if not portfolios:
         return []
-
-    cur2 = _conn.execute(
-        """
-        SELECT id, portfolio_id, isin, quantity, entry_price
-        FROM positions
-        ORDER BY portfolio_id DESC, id ASC
-        """
-    )
-    positions_all = [dict(r) for r in cur2.fetchall()]
-
-    by_portfolio: Dict[int, List[Dict[str, Any]]] = {}
-    all_isins: List[str] = []
-    seen: set[str] = set()
-    for p in positions_all:
-        pid = int(p["portfolio_id"])
-        by_portfolio.setdefault(pid, []).append(p)
-        isin = p["isin"]
-        if isin not in seen:
-            seen.add(isin)
-            all_isins.append(isin)
 
     # Für Dashboard: Snapshot aus dem aktuellen Kurs-Cache (beste Quelle).
     # Fallback: falls noch kein Kurs gesehen wurde, werden bids als None angezeigt.
@@ -1120,7 +1344,24 @@ async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
 
     cur2 = _conn.execute(
-        "SELECT id, isin, quantity, entry_price, currency FROM positions WHERE portfolio_id=? ORDER BY id ASC",
+        """
+        SELECT
+            pos.id,
+            pos.instrument_id,
+            pos.name AS position_name,
+            pos.quantity,
+            pos.entry_price,
+            pos.currency AS position_currency,
+            instr.code AS instrument_code,
+            instr.name AS instrument_name,
+            instr.currency AS instrument_currency,
+            instr.isin AS instrument_isin,
+            instr.ls_item AS instrument_ls_item
+        FROM positions pos
+        JOIN instruments instr ON instr.id = pos.instrument_id
+        WHERE pos.portfolio_id=?
+        ORDER BY pos.id ASC
+        """,
         (portfolio_id,),
     )
     return {"portfolio": dict(row), "positions": [dict(r) for r in cur2.fetchall()]}
@@ -1158,24 +1399,41 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
     prow = cur.fetchone()
     if not prow:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
-    portfolio_currency = (prow["currency"] or "EUR").strip().upper()
+    portfolio_currency = _normalize_currency(prow["currency"] or "EUR")
 
-    cleaned: List[PositionIn] = []
-    seen: set[str] = set()
+    cleaned: List[Dict[str, Any]] = []
+    seen: set[int] = set()
     for p in positions:
-        isin = validate_isin(p.isin)
-        if isin in seen:
-            raise HTTPException(status_code=400, detail=f"Doppelte ISIN im Request: {isin}")
-        seen.add(isin)
-        currency = (p.currency or portfolio_currency).strip().upper()
-        cleaned.append(PositionIn(isin=isin, quantity=p.quantity, entry_price=p.entry_price, currency=currency))
+        instr = _get_instrument(p.instrument_id)
+        if instr["id"] in seen:
+            raise HTTPException(status_code=400, detail=f"Doppeltes Instrument im Request: {instr['code']}")
+        seen.add(instr["id"])
+        currency = _normalize_currency(p.currency, default=instr.get("currency") or portfolio_currency)
+        cleaned.append(
+            {
+                "instrument_id": instr["id"],
+                "instrument_code": instr["code"],
+                "name": (p.name or "").strip() or None,
+                "quantity": p.quantity,
+                "entry_price": p.entry_price,
+                "currency": currency,
+            }
+        )
 
     with _conn:
         _conn.execute("DELETE FROM positions WHERE portfolio_id=?", (portfolio_id,))
         for p in cleaned:
             _conn.execute(
-                "INSERT INTO positions(portfolio_id, isin, quantity, entry_price, currency) VALUES (?,?,?,?,?)",
-                (portfolio_id, p.isin, p.quantity, p.entry_price, (p.currency or portfolio_currency)),
+                "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency) VALUES (?,?,?,?,?,?,?)",
+                (
+                    portfolio_id,
+                    p["instrument_id"],
+                    p["instrument_code"],
+                    p["name"],
+                    p["quantity"],
+                    p["entry_price"],
+                    p["currency"],
+                ),
             )
 
     stream_manager.mark_dirty()
@@ -1213,7 +1471,24 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
 
     cur2 = _conn.execute(
-        "SELECT id, isin, quantity, entry_price, currency FROM positions WHERE portfolio_id=? ORDER BY id ASC",
+        """
+        SELECT
+            pos.id,
+            pos.instrument_id,
+            pos.name AS position_name,
+            pos.quantity,
+            pos.entry_price,
+            pos.currency AS position_currency,
+            instr.code AS instrument_code,
+            instr.name AS instrument_name,
+            instr.currency AS instrument_currency,
+            instr.isin AS instrument_isin,
+            instr.ls_item AS instrument_ls_item
+        FROM positions pos
+        JOIN instruments instr ON instr.id = pos.instrument_id
+        WHERE pos.portfolio_id=?
+        ORDER BY pos.id ASC
+        """,
         (portfolio_id,),
     )
     positions = [dict(r) for r in cur2.fetchall()]

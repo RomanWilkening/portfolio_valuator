@@ -1,6 +1,6 @@
 ## Portfolio Valuator (BNP) – MVP
 
-Dieses Projekt ist ein MVP, um **Portfolios** (ISIN + Stückzahl + Einstandskurs) zu speichern und per **Kursquellen-Prioritaet** (z.B. BNP Lightstreamer, Tradegate) zu bewerten.
+Dieses Projekt ist ein MVP, um **Portfolios** ueber **Instrumente** (Basisdaten) zu verwalten und per **Kursquellen-Prioritaet** (z.B. BNP Lightstreamer, Tradegate) zu bewerten.
 
 ### Start (lokal)
 
@@ -32,9 +32,18 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 - Dashboard (Auto-Bewertung): `http://localhost:8000/`
 - Portfolio-Pflege (ohne Auto-Refresh): `http://localhost:8000/manage`
 
+### Datenmodell (Instrumente)
+
+- **Instrumente** enthalten Basisdaten (Code/Name/Waehrung, optional ISIN und LS Item).
+- **Positionen** verknuepfen Instrumente mit Portfolios (Menge, Entry, Positionsname).
+- **Watchlist** verknuepft Instrumente fuer Live-Kurse.
+- Instrument-Codes muessen **nicht** ISINs sein; fuer Kurse nutze optional ISIN/LS Item.
+- Lightstreamer nutzt `LS_ITEM_TEMPLATE` mit ISIN oder explizites `LS Item` am Instrument.
+- Tradegate nutzt die ISIN am Instrument (falls gesetzt).
+
 ### Watchlist (Dashboard)
 
-Im Dashboard kannst du zusätzlich zu Portfolios eine **Watchlist** pflegen (ISIN + optionales Label). Diese Werte werden live ueber die beste verfuegbare Kursquelle aktualisiert.
+Im Dashboard kannst du zusaetzlich zu Portfolios eine **Watchlist** pflegen (Instrument + optionales Label). Diese Werte werden live ueber die beste verfuegbare Kursquelle aktualisiert.
 
 ### Persistenz (SQLite)
 
@@ -56,7 +65,7 @@ Die Defaults sind auf die bisherige BNP-Lightstreamer-Konfiguration ausgelegt. B
 
 - `QUOTE_SOURCE_PRIORITY` (default: `lightstreamer,tradegate`)
 - Reihenfolge = Prioritaet. Pro Titel wird die erste Quelle mit Kurs verwendet.
-- ISINs koennen mehrere Quellen haben; X-Items/Indizes bleiben i.d.R. Lightstreamer-only.
+- ISINs koennen mehrere Quellen haben; LS Items koennen beliebige Lightstreamer-Item-IDs sein.
 
 ### Tradegate (ENV)
 
