@@ -175,6 +175,30 @@
       </div>
     </section>
 
+    <section class="card">
+      <div class="section-head">
+        <div>
+          <h2>FX-Kurse</h2>
+          <div class="sub">Ueberblick fuer Umrechnungen</div>
+        </div>
+        <span class="source">FX</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Paar</th>
+              <th>Name</th>
+              <th class="num">Kurs</th>
+              <th>Quelle</th>
+              <th>Letztes Update</th>
+            </tr>
+          </thead>
+          <tbody id="fxTbody"></tbody>
+        </table>
+      </div>
+    </section>
+
     <div id="portfolios"></div>
   </div>
 
@@ -189,6 +213,7 @@
     const watchCurrencyEl = document.getElementById("watchCurrency");
     const addWatchBtn = document.getElementById("addWatchBtn");
     const watchTbody = document.getElementById("watchTbody");
+    const fxTbody = document.getElementById("fxTbody");
 
     function setStatus(level, message) {
       statusEl.className = "status " + level;
@@ -236,6 +261,8 @@
       watchSources: new Map(),
       fxRates: new Map(),
       fxDependents: new Map(),
+      fxRows: new Map(),
+      fxUpdatedAt: new Map(),
       watch: {
         byId: new Map(),
         rowById: new Map(),
@@ -329,6 +356,48 @@
         tr.appendChild(tdDel);
         watchTbody.appendChild(tr);
         state.watch.rowById.set(id, { priceEl: tdPrice, sourceEl: sourceTag });
+      }
+    }
+
+    function renderFxRates(items) {
+      fxTbody.innerHTML = "";
+      state.fxRows.clear();
+      state.fxInstruments.clear();
+      for (const fx of (items || [])) {
+        const code = String(fx.code || "");
+        if (!code) continue;
+        state.fxInstruments.set(code, fx);
+        const pair = `${fx.base_currency || "?"}/${fx.quote_currency || "?"}`;
+        const price = fx.price !== null && fx.price !== undefined ? Number(fx.price) : null;
+        if (price !== null) state.fxRates.set(code, price);
+        if (fx.price_source) state.priceSources.set(code, String(fx.price_source));
+
+        const tr = document.createElement("tr");
+        const tdPair = document.createElement("td");
+        const tdName = document.createElement("td");
+        const tdPrice = document.createElement("td");
+        const tdSource = document.createElement("td");
+        const tdTime = document.createElement("td");
+        tdPrice.classList.add("num");
+
+        tdPair.textContent = pair;
+        tdName.textContent = fx.name || code;
+        tdPrice.textContent = price === null ? "—" : fmtNum(price);
+
+        const sourceTag = document.createElement("span");
+        sourceTag.className = "source";
+        sourceTag.textContent = fx.price_source || "—";
+        tdSource.appendChild(sourceTag);
+
+        tdTime.textContent = state.fxUpdatedAt.get(code) || "—";
+
+        tr.appendChild(tdPair);
+        tr.appendChild(tdName);
+        tr.appendChild(tdPrice);
+        tr.appendChild(tdSource);
+        tr.appendChild(tdTime);
+        fxTbody.appendChild(tr);
+        state.fxRows.set(code, { priceEl: tdPrice, sourceEl: sourceTag, timeEl: tdTime });
       }
     }
 
@@ -617,8 +686,16 @@
         }
       }
 
-      if (state.fxInstruments.has(code) && price !== null && price !== undefined) {
-        state.fxRates.set(code, Number(price));
+      if (state.fxInstruments.has(code)) {
+        const fxPrice = price !== null && price !== undefined ? Number(price) : null;
+        if (fxPrice !== null) state.fxRates.set(code, fxPrice);
+        if (quotetime) state.fxUpdatedAt.set(code, String(quotetime));
+        const fxRow = state.fxRows.get(code);
+        if (fxRow) {
+          fxRow.priceEl.textContent = fxPrice === null ? "—" : fmtNum(fxPrice);
+          fxRow.sourceEl.textContent = state.priceSources.get(code) || "—";
+          fxRow.timeEl.textContent = state.fxUpdatedAt.get(code) || "—";
+        }
         const dependent = state.fxDependents.get(code);
         if (dependent) {
           for (const entry of dependent.values()) {
@@ -668,6 +745,7 @@
         if (msg.type === "snapshot") {
           renderAll(msg.valuations || []);
           renderWatchlist(msg.watchlist || []);
+          renderFxRates(msg.fx_rates || []);
           return;
         }
 
@@ -726,6 +804,7 @@
         renderInstrumentSelect(watchInstrumentEl, state.instruments);
         renderAll(vals);
         renderWatchlist(watch);
+        renderFxRates(fxRates);
         connectWs();
       })
       .catch(e => setStatus("error", String(e.message || e)));
