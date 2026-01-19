@@ -35,6 +35,8 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 ### Datenmodell (Instrumente)
 
 - **Instrumente** enthalten Basisdaten (Code/Name/Waehrung, optional ISIN und LS Item).
+- Instrumente koennen Typ **FX** sein (Base/Quote), um Positionen in Portfolio-Waehrung umzurechnen.
+- Fuer Umrechnung wird ein FX-Instrument mit `base_currency = Positionswaehrung` und `quote_currency = Portfoliowaehrung` erwartet (direkt oder invers).
 - **Positionen** verknuepfen Instrumente mit Portfolios (Menge, Entry, Positionsname).
 - **Watchlist** verknuepft Instrumente fuer Live-Kurse.
 - Instrument-Codes muessen **nicht** ISINs sein; fuer Kurse nutze optional ISIN/LS Item.

@@ -130,7 +130,10 @@
               <tr>
                 <th>Code</th>
                 <th>Name</th>
+                <th>Typ</th>
                 <th>Waehrung</th>
+                <th>Base</th>
+                <th>Quote</th>
                 <th>ISIN</th>
                 <th>LS Item</th>
                 <th></th>
@@ -142,12 +145,18 @@
         <div class="inline-form" style="margin-top: 12px;">
           <input id="newInstrumentCode" placeholder="Instrument-ID" />
           <input id="newInstrumentName" placeholder="Name" />
+          <select id="newInstrumentType">
+            <option value="asset">Asset</option>
+            <option value="fx">FX</option>
+          </select>
           <select id="newInstrumentCurrency">
             <option value="EUR">EUR</option>
             <option value="USD">USD</option>
             <option value="CHF">CHF</option>
             <option value="GBP">GBP</option>
           </select>
+          <input id="newInstrumentBase" placeholder="Base (z.B. USD)" />
+          <input id="newInstrumentQuote" placeholder="Quote (z.B. EUR)" />
           <input id="newInstrumentIsin" placeholder="ISIN (optional)" />
           <input id="newInstrumentLsItem" placeholder="LS Item (optional)" />
           <button id="addInstrumentBtn" class="button">Anlegen</button>
@@ -274,7 +283,10 @@
     const instrumentsTbody = document.getElementById("instrumentsTbody");
     const newInstrumentCode = document.getElementById("newInstrumentCode");
     const newInstrumentName = document.getElementById("newInstrumentName");
+    const newInstrumentType = document.getElementById("newInstrumentType");
     const newInstrumentCurrency = document.getElementById("newInstrumentCurrency");
+    const newInstrumentBase = document.getElementById("newInstrumentBase");
+    const newInstrumentQuote = document.getElementById("newInstrumentQuote");
     const newInstrumentIsin = document.getElementById("newInstrumentIsin");
     const newInstrumentLsItem = document.getElementById("newInstrumentLsItem");
     const addInstrumentBtn = document.getElementById("addInstrumentBtn");
@@ -352,7 +364,10 @@
         tr.dataset.id = String(inst.id);
         const tdCode = document.createElement("td");
         const tdName = document.createElement("td");
+        const tdType = document.createElement("td");
         const tdCurr = document.createElement("td");
+        const tdBase = document.createElement("td");
+        const tdQuote = document.createElement("td");
         const tdIsin = document.createElement("td");
         const tdLs = document.createElement("td");
         const tdActions = document.createElement("td");
@@ -361,6 +376,14 @@
         codeInput.value = inst.code || "";
         const nameInput = document.createElement("input");
         nameInput.value = inst.name || "";
+        const typeSelect = document.createElement("select");
+        ["asset", "fx"].forEach(t => {
+          const opt = document.createElement("option");
+          opt.value = t;
+          opt.textContent = t.toUpperCase();
+          typeSelect.appendChild(opt);
+        });
+        typeSelect.value = (inst.type || "asset").toLowerCase();
         const currSelect = document.createElement("select");
         ["EUR", "USD", "CHF", "GBP"].forEach(c => {
           const opt = document.createElement("option");
@@ -369,6 +392,10 @@
           currSelect.appendChild(opt);
         });
         currSelect.value = (inst.currency || "EUR").toUpperCase();
+        const baseInput = document.createElement("input");
+        baseInput.value = inst.base_currency || "";
+        const quoteInput = document.createElement("input");
+        quoteInput.value = inst.quote_currency || "";
         const isinInput = document.createElement("input");
         isinInput.value = inst.isin || "";
         const lsInput = document.createElement("input");
@@ -378,7 +405,10 @@
           const payload = {
             code: codeInput.value.trim(),
             name: nameInput.value.trim(),
+            type: typeSelect.value,
             currency: currSelect.value,
+            base_currency: baseInput.value.trim() || null,
+            quote_currency: quoteInput.value.trim() || null,
             isin: isinInput.value.trim() || null,
             ls_item: lsInput.value.trim() || null,
           };
@@ -388,7 +418,7 @@
           setStatus("success", "Instrument gespeichert.");
         };
 
-        [codeInput, nameInput, currSelect, isinInput, lsInput].forEach(el => {
+        [codeInput, nameInput, typeSelect, currSelect, baseInput, quoteInput, isinInput, lsInput].forEach(el => {
           el.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
         });
 
@@ -407,14 +437,20 @@
 
         tdCode.appendChild(codeInput);
         tdName.appendChild(nameInput);
+        tdType.appendChild(typeSelect);
         tdCurr.appendChild(currSelect);
+        tdBase.appendChild(baseInput);
+        tdQuote.appendChild(quoteInput);
         tdIsin.appendChild(isinInput);
         tdLs.appendChild(lsInput);
         tdActions.appendChild(delBtn);
 
         tr.appendChild(tdCode);
         tr.appendChild(tdName);
+        tr.appendChild(tdType);
         tr.appendChild(tdCurr);
+        tr.appendChild(tdBase);
+        tr.appendChild(tdQuote);
         tr.appendChild(tdIsin);
         tr.appendChild(tdLs);
         tr.appendChild(tdActions);
@@ -670,7 +706,10 @@
       const payload = {
         code,
         name,
+        type: newInstrumentType.value,
         currency: newInstrumentCurrency.value,
+        base_currency: newInstrumentBase.value.trim() || null,
+        quote_currency: newInstrumentQuote.value.trim() || null,
         isin: newInstrumentIsin.value.trim() || null,
         ls_item: newInstrumentLsItem.value.trim() || null,
       };
@@ -678,6 +717,8 @@
       await api("/api/instruments", { method: "POST", body: JSON.stringify(payload) });
       newInstrumentCode.value = "";
       newInstrumentName.value = "";
+      newInstrumentBase.value = "";
+      newInstrumentQuote.value = "";
       newInstrumentIsin.value = "";
       newInstrumentLsItem.value = "";
       await loadInstruments();

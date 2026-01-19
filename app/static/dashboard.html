@@ -225,13 +225,17 @@
 
     const state = {
       instruments: [],
+      fxInstruments: new Map(),
       portfolios: new Map(),
       codesToPortfolios: new Map(),
       bids: new Map(),
-      bidSources: new Map(),
+      prices: new Map(),
+      priceSources: new Map(),
       watchPrices: new Map(),
       watchFields: new Map(),
       watchSources: new Map(),
+      fxRates: new Map(),
+      fxDependents: new Map(),
       watch: {
         byId: new Map(),
         rowById: new Map(),
@@ -260,6 +264,9 @@
       state.watch.byId.clear();
       state.watch.rowById.clear();
       state.watch.idByCode.clear();
+      state.watchPrices.clear();
+      state.watchFields.clear();
+      state.watchSources.clear();
 
       for (const it of (items || [])) {
         const id = Number(it.id);
@@ -269,6 +276,7 @@
         state.watch.idByCode.set(code, id);
         if (it.price !== null && it.price !== undefined) state.watchPrices.set(code, Number(it.price));
         if (it.field) state.watchFields.set(code, String(it.field));
+        if (it.price_source) state.watchSources.set(code, String(it.price_source));
 
         const tr = document.createElement("tr");
         const tdInst = document.createElement("td");
@@ -292,8 +300,7 @@
         tdLabel.textContent = label || "—";
 
         const px = state.watchPrices.get(code);
-        const f = state.watchFields.get(code);
-        tdPrice.textContent = (px === undefined) ? "—" : (fmtNum(px) + (f ? ` (${f})` : ""));
+        tdPrice.textContent = (px === undefined) ? "—" : fmtNum(px);
 
         const source = state.watchSources.get(code) || "—";
         const sourceTag = document.createElement("span");
@@ -329,6 +336,10 @@
       portfoliosEl.innerHTML = "";
       state.portfolios.clear();
       state.codesToPortfolios.clear();
+      state.fxDependents.clear();
+      state.prices.clear();
+      state.priceSources.clear();
+      state.fxRates.clear();
 
       if (!valuations || !valuations.length) {
         const empty = document.createElement("div");
@@ -382,7 +393,7 @@
               <th>Position</th>
               <th class="num">Menge</th>
               <th class="num">Entry</th>
-              <th class="num">Bid</th>
+              <th class="num">Preis</th>
               <th class="num">Market Value</th>
               <th class="num">Cost Basis</th>
               <th class="num">PnL</th>
@@ -410,10 +421,31 @@
           const code = p.instrument_code || p.instrument_id;
           const instrumentName = p.instrument_name || code || "—";
           const positionName = p.name || "—";
-          portfolioState.positions.set(code, { quantity: Number(p.quantity), entry_price: Number(p.entry_price) });
+          const positionCurrency = (p.position_currency || p.currency || "EUR").toUpperCase();
+          const portfolioCurrency = (v.currency || p.currency || "EUR").toUpperCase();
+          const fxInstrumentCode = p.fx_instrument_code || null;
+          portfolioState.positions.set(code, {
+            quantity: Number(p.quantity),
+            entry_price: Number(p.entry_price),
+            position_currency: positionCurrency,
+            portfolio_currency: portfolioCurrency,
+            fx_instrument_code: fxInstrumentCode,
+          });
           if (!state.codesToPortfolios.has(code)) state.codesToPortfolios.set(code, new Set());
           state.codesToPortfolios.get(code).add(pid);
           if (p.bid !== null && p.bid !== undefined) state.bids.set(code, Number(p.bid));
+          const initialPrice = (p.price !== null && p.price !== undefined)
+            ? Number(p.price)
+            : (p.bid !== null && p.bid !== undefined ? Number(p.bid) : null);
+          if (initialPrice !== null) state.prices.set(code, initialPrice);
+          if (p.price_source) state.priceSources.set(code, String(p.price_source));
+          if (fxInstrumentCode && p.fx_rate !== null && p.fx_rate !== undefined) {
+            state.fxRates.set(fxInstrumentCode, Number(p.fx_rate));
+          }
+          if (fxInstrumentCode) {
+            if (!state.fxDependents.has(fxInstrumentCode)) state.fxDependents.set(fxInstrumentCode, new Set());
+            state.fxDependents.get(fxInstrumentCode).add(`${pid}:${code}`);
+          }
 
           const tdInst = document.createElement("td");
           const instStack = document.createElement("div");
@@ -440,7 +472,7 @@
 
           const tdBid = document.createElement("td");
           tdBid.className = "num";
-          tdBid.textContent = (p.bid === null || p.bid === undefined) ? "—" : fmtNum(p.bid);
+          tdBid.textContent = (initialPrice === null) ? "—" : fmtNum(initialPrice);
 
           const tdMv = document.createElement("td");
           tdMv.className = "num";
@@ -461,7 +493,7 @@
           const tdSource = document.createElement("td");
           const sourceTag = document.createElement("span");
           sourceTag.className = "source";
-          sourceTag.textContent = state.bidSources.get(code) || "—";
+          sourceTag.textContent = state.priceSources.get(code) || "—";
           tdSource.appendChild(sourceTag);
 
           tr.appendChild(tdInst);
@@ -484,15 +516,55 @@
       }
     }
 
+    function calcPositionMetrics(pos, price) {
+      if (price === null || price === undefined) {
+        return { mv: null, cb: null, pnl: null, pnlPct: null };
+      }
+      const mvLocal = price * pos.quantity;
+      const cbLocal = pos.entry_price * pos.quantity;
+      if (pos.position_currency !== pos.portfolio_currency) {
+        const fxRate = pos.fx_instrument_code ? state.fxRates.get(pos.fx_instrument_code) : null;
+        if (!fxRate) {
+          return { mv: null, cb: null, pnl: null, pnlPct: null };
+        }
+        const mv = mvLocal * fxRate;
+        const cb = cbLocal * fxRate;
+        const pnl = mv - cb;
+        const pnlPct = cb ? (pnl / cb) : null;
+        return { mv, cb, pnl, pnlPct };
+      }
+      const pnl = mvLocal - cbLocal;
+      const pnlPct = cbLocal ? (pnl / cbLocal) : null;
+      return { mv: mvLocal, cb: cbLocal, pnl, pnlPct };
+    }
+
+    function updatePositionRow(pid, code) {
+      const pf = state.portfolios.get(pid);
+      if (!pf) return;
+      const row = pf.rowsByCode.get(code);
+      const pos = pf.positions.get(code);
+      if (!row || !pos) return;
+      const price = state.prices.get(code);
+      const metrics = calcPositionMetrics(pos, price);
+      row.bidEl.textContent = (price === undefined) ? "—" : fmtNum(price);
+      row.mvEl.textContent = metrics.mv === null ? "—" : fmtNum(metrics.mv);
+      row.pnlEl.textContent = metrics.pnl === null ? "—" : fmtNum(metrics.pnl);
+      row.pnlPctEl.textContent = metrics.pnlPct === null ? "—" : fmtPct(metrics.pnlPct);
+      row.pnlEl.className = "num " + clsPnL(metrics.pnl);
+      row.pnlPctEl.className = "num " + clsPnL(metrics.pnl);
+      row.sourceEl.textContent = state.priceSources.get(code) || "—";
+    }
+
     function recomputePortfolio(pid) {
       const pf = state.portfolios.get(pid);
       if (!pf) return;
       let mv = 0;
       let cb = 0;
       for (const [code, pos] of pf.positions.entries()) {
-        cb += pos.entry_price * pos.quantity;
-        const bid = state.bids.get(code);
-        if (bid !== undefined) mv += bid * pos.quantity;
+        const price = state.prices.get(code);
+        const metrics = calcPositionMetrics(pos, price);
+        if (metrics.mv !== null) mv += metrics.mv;
+        if (metrics.cb !== null) cb += metrics.cb;
       }
       const pnl = mv - cb;
       pf.totalsEl.mv.textContent = fmtNum(mv);
@@ -502,11 +574,16 @@
       pf.totalsEl.at.textContent = new Date().toISOString();
     }
 
-    function applyQuoteUpdate(key, bid, watchPrice, watchField, quotetime, bidSource, watchSource) {
+    function applyQuoteUpdate(key, bid, price, watchPrice, watchField, quotetime, priceSource, watchSource) {
       if (!key) return;
       const code = String(key);
       if (bid !== null && bid !== undefined) state.bids.set(code, Number(bid));
-      if (bidSource) state.bidSources.set(code, String(bidSource));
+      if (price !== null && price !== undefined) {
+        state.prices.set(code, Number(price));
+      } else if (bid !== null && bid !== undefined) {
+        state.prices.set(code, Number(bid));
+      }
+      if (priceSource) state.priceSources.set(code, String(priceSource));
       if (watchPrice !== null && watchPrice !== undefined) state.watchPrices.set(code, Number(watchPrice));
       if (watchField) state.watchFields.set(code, String(watchField));
       if (watchSource) state.watchSources.set(code, String(watchSource));
@@ -517,35 +594,27 @@
         const row = state.watch.rowById.get(wid);
         if (row) {
           const px = state.watchPrices.get(code);
-          const f = state.watchFields.get(code);
-          row.priceEl.textContent = (px === undefined) ? "—" : (fmtNum(px) + (f ? ` (${f})` : ""));
+          row.priceEl.textContent = (px === undefined) ? "—" : fmtNum(px);
           row.sourceEl.textContent = state.watchSources.get(code) || "—";
         }
       }
 
+      if (state.fxInstruments.has(code) && price !== null && price !== undefined) {
+        state.fxRates.set(code, Number(price));
+        const dependent = state.fxDependents.get(code);
+        if (dependent) {
+          for (const entry of dependent.values()) {
+            const [pidStr, instrumentCode] = entry.split(":");
+            updatePositionRow(Number(pidStr), instrumentCode);
+            recomputePortfolio(Number(pidStr));
+          }
+        }
+      }
+
       const pids = state.codesToPortfolios.get(code);
-      if (!pids || bid === null || bid === undefined) return;
-
+      if (!pids) return;
       for (const pid of pids.values()) {
-        const pf = state.portfolios.get(pid);
-        if (!pf) continue;
-        const row = pf.rowsByCode.get(code);
-        const pos = pf.positions.get(code);
-        if (!row || !pos) continue;
-
-        const mv = bid * pos.quantity;
-        const cb = pos.entry_price * pos.quantity;
-        const pnl = mv - cb;
-        const pnlPct = cb ? (pnl / cb) : null;
-
-        row.bidEl.textContent = fmtNum(bid);
-        row.mvEl.textContent = fmtNum(mv);
-        row.pnlEl.textContent = fmtNum(pnl);
-        row.pnlPctEl.textContent = pnlPct === null ? "—" : fmtPct(pnlPct);
-        row.pnlEl.className = "num " + clsPnL(pnl);
-        row.pnlPctEl.className = "num " + clsPnL(pnl);
-        row.sourceEl.textContent = state.bidSources.get(code) || "—";
-
+        updatePositionRow(pid, code);
         recomputePortfolio(pid);
       }
     }
@@ -588,10 +657,11 @@
           applyQuoteUpdate(
             msg.key || msg.instrument_code || msg.isin,
             msg.bid,
+            msg.price,
             msg.watch_price,
             msg.watch_field,
             msg.quotetime,
-            msg.bid_source,
+            msg.price_source,
             msg.watch_source
           );
         }
@@ -631,6 +701,12 @@
     Promise.all([api("/api/instruments"), api("/api/portfolios/valuations"), api("/api/watchlist")])
       .then(([instruments, vals, watch]) => {
         state.instruments = instruments || [];
+        state.fxInstruments.clear();
+        for (const inst of state.instruments) {
+          if ((inst.type || "asset") === "fx" && inst.code) {
+            state.fxInstruments.set(inst.code, inst);
+          }
+        }
         renderInstrumentSelect(watchInstrumentEl, state.instruments);
         renderAll(vals);
         renderWatchlist(watch);

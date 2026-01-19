@@ -347,7 +347,7 @@ class HomeAssistantMqttPublisher:
             pf_name = (pfo.get("name") or str(pid)).strip()
             base = f"portfolio_{pid}"
             positions = (pf or {}).get("positions") or []
-            missing_price = any((pos.get("bid") is None) for pos in positions)
+            missing_price = any(((pos.get("price") is None) and (pos.get("bid") is None)) for pos in positions)
 
             # Basis ist immer stabil (Entry*Qty). Wert/Performance nur, wenn Kursdaten vorhanden sind.
             add_sensor(
@@ -394,7 +394,9 @@ class HomeAssistantMqttPublisher:
                     continue
                 isin = pos.get("instrument_code") or pos.get("isin")
                 qty = pos.get("quantity")
+                price = pos.get("price")
                 bid = pos.get("bid")
+                price_for_kurs = price if price is not None else bid
                 cost_basis = pos.get("cost_basis")
                 market_value = pos.get("market_value")
                 p_pnl = pos.get("pnl")
@@ -423,11 +425,11 @@ class HomeAssistantMqttPublisher:
                     {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},
                     kind="value",
                 )
-                if (not self.s.sanity_require_price_for_valuation) or (bid is not None):
+                if (not self.s.sanity_require_price_for_valuation) or (price_for_kurs is not None):
                     add_sensor(
                         f"{pbase}_kurs",
                         f"{display_name} Kurs",
-                        None if bid is None else round(float(bid), 4),
+                        None if price_for_kurs is None else round(float(price_for_kurs), 4),
                         pos_currency,
                         "monetary",
                         {"id": pos_id, "type": "position", "isin": isin_s, "portfolio_id": pid, "currency": pos_currency},

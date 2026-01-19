@@ -31,6 +31,9 @@ def init_db(conn: sqlite3.Connection) -> None:
           code TEXT NOT NULL UNIQUE,
           name TEXT NOT NULL,
           currency TEXT NOT NULL DEFAULT 'EUR',
+          type TEXT NOT NULL DEFAULT 'asset',
+          base_currency TEXT,
+          quote_currency TEXT,
           isin TEXT,
           ls_item TEXT,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -82,6 +85,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         if column not in _cols(table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl};")
 
+    _add_column("instruments", "type", "type TEXT NOT NULL DEFAULT 'asset'")
+    _add_column("instruments", "base_currency", "base_currency TEXT")
+    _add_column("instruments", "quote_currency", "quote_currency TEXT")
     _add_column("instruments", "isin", "isin TEXT")
     _add_column("instruments", "ls_item", "ls_item TEXT")
     _add_column("positions", "instrument_id", "instrument_id INTEGER")
@@ -115,7 +121,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         return bool(re.fullmatch(r"X[0-9A-Z]{6,32}", (value or "").strip().upper()))
 
     def _get_or_create_instrument(code: str, *, name: str, currency: str, isin: Optional[str], ls_item: Optional[str]) -> int:
-        cur = conn.execute("SELECT id, name, currency, isin, ls_item FROM instruments WHERE code=?", (code,))
+        cur = conn.execute("SELECT id, name, currency, isin, ls_item, type FROM instruments WHERE code=?", (code,))
         row = cur.fetchone()
         if row:
             updates = []
@@ -134,8 +140,8 @@ def init_db(conn: sqlite3.Connection) -> None:
                 conn.execute(f"UPDATE instruments SET {', '.join(updates)} WHERE id=?", tuple(values))
             return int(row["id"])
         conn.execute(
-            "INSERT INTO instruments(code, name, currency, isin, ls_item) VALUES (?,?,?,?,?)",
-            (code, name, (currency or "EUR").strip().upper(), isin, ls_item),
+            "INSERT INTO instruments(code, name, currency, type, isin, ls_item) VALUES (?,?,?,?,?,?)",
+            (code, name, (currency or "EUR").strip().upper(), "asset", isin, ls_item),
         )
         return int(conn.execute("SELECT id FROM instruments WHERE code=?", (code,)).fetchone()["id"])
 
@@ -167,6 +173,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             name = (row["label"] or "").strip() or code
             inst_id = _get_or_create_instrument(code, name=name, currency=row["currency"] or "EUR", isin=isin, ls_item=ls_item)
             conn.execute("UPDATE watchlist SET instrument_id=? WHERE id=?", (inst_id, row["id"]))
+    except Exception:
+        pass
+
+    try:
+        conn.execute("UPDATE instruments SET type='asset' WHERE type IS NULL OR type=''")
     except Exception:
         pass
 
