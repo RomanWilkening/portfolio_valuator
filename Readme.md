@@ -1,6 +1,6 @@
 ## Portfolio Valuator (BNP) – MVP
 
-Dieses Projekt ist ein MVP, um **Portfolios** (ISIN + Stückzahl + Einstandskurs) zu speichern und über **BNP Push / Lightstreamer** per **Bid-Quote** zu bewerten.
+Dieses Projekt ist ein MVP, um **Portfolios** (ISIN + Stückzahl + Einstandskurs) zu speichern und per **Kursquellen-Prioritaet** (z.B. BNP Lightstreamer, Tradegate) zu bewerten.
 
 ### Start (lokal)
 
@@ -34,7 +34,7 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 
 ### Watchlist (Dashboard)
 
-Im Dashboard kannst du zusätzlich zu Portfolios eine **Watchlist** pflegen (ISIN + optionales Label). Diese Werte werden über den gleichen Lightstreamer-Stream live aktualisiert.
+Im Dashboard kannst du zusätzlich zu Portfolios eine **Watchlist** pflegen (ISIN + optionales Label). Diese Werte werden live ueber die beste verfuegbare Kursquelle aktualisiert.
 
 ### Persistenz (SQLite)
 
@@ -51,6 +51,19 @@ Die Defaults sind auf die bisherige BNP-Lightstreamer-Konfiguration ausgelegt. B
 - `LS_ITEM_TEMPLATE` (default: `X0000010800{isin}`)
 - `LS_ORIGIN` (default: `https://derivate.bnpparibas.com`, leer setzen zum Deaktivieren)
 - `LS_BID_TIMEOUT` (default: `8`)
+
+### Kursquellen & Prioritaet
+
+- `QUOTE_SOURCE_PRIORITY` (default: `lightstreamer,tradegate`)
+- Reihenfolge = Prioritaet. Pro Titel wird die erste Quelle mit Kurs verwendet.
+- ISINs koennen mehrere Quellen haben; X-Items/Indizes bleiben i.d.R. Lightstreamer-only.
+
+### Tradegate (ENV)
+
+- `TRADEGATE_URL_TEMPLATE` (default: `https://www.tradegate.de/refresh.php?isin={isin}`)
+- `TRADEGATE_POLL_S` (default: `10`)
+- `TRADEGATE_TIMEOUT_S` (default: `5`)
+- `TRADEGATE_USER_AGENT` (optional)
 
 ### MQTT → Home Assistant (Auto-Detect)
 
