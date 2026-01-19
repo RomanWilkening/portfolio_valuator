@@ -546,14 +546,6 @@ def load_stream_instruments(conn) -> List[Dict[str, Any]]:
             fx.base_currency AS base_currency,
             fx.quote_currency AS quote_currency
         FROM fx_rates fx
-        WHERE fx.id IN (
-            SELECT fx2.id
-            FROM fx_rates fx2
-            JOIN positions pos ON pos.currency = fx2.base_currency
-            JOIN portfolios pf ON pf.id = pos.portfolio_id
-            WHERE (fx2.base_currency = pos.currency AND fx2.quote_currency = pf.currency)
-               OR (fx2.base_currency = pf.currency AND fx2.quote_currency = pos.currency)
-        )
         ORDER BY code DESC
         """
     )
