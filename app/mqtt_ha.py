@@ -392,7 +392,7 @@ class HomeAssistantMqttPublisher:
                 pos_id = pos.get("id")
                 if pos_id is None:
                     continue
-                isin = pos.get("isin")
+                isin = pos.get("instrument_code") or pos.get("isin")
                 qty = pos.get("quantity")
                 bid = pos.get("bid")
                 cost_basis = pos.get("cost_basis")
@@ -402,11 +402,12 @@ class HomeAssistantMqttPublisher:
                 pos_currency = (pos.get("currency") or currency or "EUR").strip().upper()
 
                 isin_s = (isin or str(pos_id) or "").strip()
+                display_name = (pos.get("instrument_name") or isin_s).strip()
                 # object_id muss eindeutig sein, daher Portfolio-ID anhängen (gleiche ISIN kann in mehreren Portfolios vorkommen)
                 pbase = f"{isin_s}_p{pid}"
                 add_sensor(
                     f"{pbase}_stueck",
-                    f"{isin_s} Stück",
+                    f"{display_name} Stück",
                     round(float(qty or 0.0), 2),
                     "stk",
                     None,
@@ -415,7 +416,7 @@ class HomeAssistantMqttPublisher:
                 )
                 add_sensor(
                     f"{pbase}_basis",
-                    f"{isin_s} Basis",
+                    f"{display_name} Basis",
                     round(float(cost_basis or 0.0), 2),
                     pos_currency,
                     "monetary",
@@ -425,7 +426,7 @@ class HomeAssistantMqttPublisher:
                 if (not self.s.sanity_require_price_for_valuation) or (bid is not None):
                     add_sensor(
                         f"{pbase}_kurs",
-                        f"{isin_s} Kurs",
+                        f"{display_name} Kurs",
                         None if bid is None else round(float(bid), 4),
                         pos_currency,
                         "monetary",
@@ -434,7 +435,7 @@ class HomeAssistantMqttPublisher:
                     )
                     add_sensor(
                         f"{pbase}_wert",
-                        f"{isin_s} Wert",
+                        f"{display_name} Wert",
                         None if market_value is None else round(float(market_value), 2),
                         pos_currency,
                         "monetary",
@@ -443,7 +444,7 @@ class HomeAssistantMqttPublisher:
                     )
                     add_sensor(
                         f"{pbase}_performance",
-                        f"{isin_s} Performance",
+                        f"{display_name} Performance",
                         None if p_pnl is None else round(float(p_pnl), 2),
                         pos_currency,
                         "monetary",
@@ -452,7 +453,7 @@ class HomeAssistantMqttPublisher:
                     )
                 add_sensor(
                     f"{pbase}_performance_pct",
-                    f"{isin_s} Performance%",
+                    f"{display_name} Performance%",
                     None if p_pnl_pct is None else round(float(p_pnl_pct) * 100.0, 2),
                     "%",
                     None,
@@ -466,7 +467,7 @@ class HomeAssistantMqttPublisher:
             if wid is None:
                 continue
             label = (w.get("label") or "").strip()
-            key = w.get("key") or w.get("isin")
+            key = w.get("key") or w.get("instrument_code") or w.get("isin")
             currency = (w.get("currency") or "EUR").strip().upper()
             price = w.get("price")
             field = w.get("field")

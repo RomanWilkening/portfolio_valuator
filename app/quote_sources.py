@@ -219,10 +219,18 @@ class TradegateClient:
         except Exception as exc:
             logger.warning("Tradegate request failed for %s: %s", isin, exc)
             return None
+        if not raw or not raw.strip():
+            logger.debug("Tradegate empty response for %s", isin)
+            return None
+        stripped = raw.lstrip()
+        if stripped.startswith("<"):
+            logger.debug("Tradegate non-json response for %s", isin)
+            return None
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            logger.warning("Tradegate JSON decode failed for %s: %s", isin, exc)
+            snippet = raw.strip().replace("\n", " ")[:120]
+            logger.warning("Tradegate JSON decode failed for %s: %s (payload=%s)", isin, exc, snippet)
             return None
         if not isinstance(data, dict):
             logger.warning("Tradegate payload not a dict for %s", isin)
@@ -242,7 +250,7 @@ class TradegatePoller:
         self.router = router
         self.on_best_update = on_best_update
         self.client = TradegateClient(settings)
-        self._keys: set[str] = set()
+        self._mapping: Dict[str, str] = {}
         self._enabled = False
         self._task: Optional[asyncio.Task] = None
 
@@ -258,18 +266,18 @@ class TradegatePoller:
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
 
-    def set_keys(self, keys: Iterable[str]) -> None:
-        self._keys = {k for k in keys if k}
+    def set_mapping(self, mapping: Dict[str, str]) -> None:
+        self._mapping = {k: v for k, v in (mapping or {}).items() if k and v}
 
     async def _run(self) -> None:
         while True:
             try:
-                if not self._enabled or not self._keys:
+                if not self._enabled or not self._mapping:
                     await asyncio.sleep(0.5)
                     continue
 
-                keys = list(self._keys)
-                for isin in keys:
+                items = list(self._mapping.items())
+                for key, isin in items:
                     payload = await asyncio.to_thread(self.client.fetch, isin)
                     if not payload:
                         continue
@@ -278,13 +286,13 @@ class TradegatePoller:
                         continue
                     changed = self.router.update_from_source(
                         source=SOURCE_TRADEGATE,
-                        key=isin,
+                        key=key,
                         bid=price,
                         watch_price=price,
                         watch_field=field,
                     )
                     if changed:
-                        await self.on_best_update(isin, now_iso())
+                        await self.on_best_update(key, now_iso())
 
                 await asyncio.sleep(max(0.5, float(self.settings.poll_s)))
             except asyncio.CancelledError:
