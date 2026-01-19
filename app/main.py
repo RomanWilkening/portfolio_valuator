@@ -511,24 +511,43 @@ def load_watchlist(conn) -> List[Dict[str, Any]]:
 def load_stream_instruments(conn) -> List[Dict[str, Any]]:
     cur = conn.execute(
         """
-        SELECT id, code, name, currency, isin, ls_item, type, base_currency, quote_currency
-        FROM instruments
-        WHERE id IN (
+        SELECT
+            instr.id AS id,
+            instr.code AS code,
+            instr.name AS name,
+            instr.currency AS currency,
+            instr.isin AS isin,
+            instr.ls_item AS ls_item,
+            'asset' AS type,
+            NULL AS base_currency,
+            NULL AS quote_currency
+        FROM instruments instr
+        WHERE instr.id IN (
             SELECT instrument_id FROM positions
             UNION
             SELECT instrument_id FROM watchlist
-            UNION
-            SELECT fx.id
-            FROM instruments fx
-            JOIN positions pos ON pos.currency = fx.base_currency
-            JOIN portfolios pf ON pf.id = pos.portfolio_id
-            WHERE fx.type = 'fx'
-              AND (
-                (fx.base_currency = pos.currency AND fx.quote_currency = pf.currency)
-                OR (fx.base_currency = pf.currency AND fx.quote_currency = pos.currency)
-              )
         )
-        ORDER BY id DESC
+        UNION
+        SELECT
+            fx.id AS id,
+            fx.code AS code,
+            fx.name AS name,
+            fx.quote_currency AS currency,
+            fx.isin AS isin,
+            fx.ls_item AS ls_item,
+            'fx' AS type,
+            fx.base_currency AS base_currency,
+            fx.quote_currency AS quote_currency
+        FROM fx_rates fx
+        WHERE fx.id IN (
+            SELECT fx2.id
+            FROM fx_rates fx2
+            JOIN positions pos ON pos.currency = fx2.base_currency
+            JOIN portfolios pf ON pf.id = pos.portfolio_id
+            WHERE (fx2.base_currency = pos.currency AND fx2.quote_currency = pf.currency)
+               OR (fx2.base_currency = pf.currency AND fx2.quote_currency = pos.currency)
+        )
+        ORDER BY code DESC
         """
     )
     return [dict(r) for r in cur.fetchall()]
@@ -543,7 +562,7 @@ def build_fx_rates(
         if (instr.get("type") or "asset") != "fx":
             continue
         base = _normalize_currency(instr.get("base_currency") or "", default=None)
-        quote = _normalize_currency(instr.get("quote_currency") or instr.get("currency") or "", default=None)
+        quote = _normalize_currency(instr.get("quote_currency") or "", default=None)
         if not base or not quote:
             continue
         code = instr.get("code")
@@ -1092,26 +1111,21 @@ def compute_valuation(
             if fx_rate is None:
                 fx_missing = True
 
-        if pos_currency == portfolio_currency:
-            market_value = market_value_local
-            cost_basis = cost_basis_local
-            pnl = pnl_local
-        elif fx_rate is not None:
-            market_value = (market_value_local * fx_rate) if market_value_local is not None else None
-            cost_basis = cost_basis_local * fx_rate
-            pnl = (market_value - cost_basis) if market_value is not None else None
-        else:
-            market_value = None
-            cost_basis = None
-            pnl = None
-            total_missing_fx += 1
-
+        market_value = market_value_local
+        cost_basis = cost_basis_local
+        pnl = pnl_local
         pnl_pct = (pnl / cost_basis) if (pnl is not None and cost_basis) else None
 
-        if market_value is not None:
-            total_mv += market_value
-        if cost_basis is not None:
-            total_cb += cost_basis
+        if pos_currency == portfolio_currency:
+            if market_value_local is not None:
+                total_mv += market_value_local
+            total_cb += cost_basis_local
+        elif fx_rate is not None:
+            if market_value_local is not None:
+                total_mv += market_value_local * fx_rate
+            total_cb += cost_basis_local * fx_rate
+        else:
+            total_missing_fx += 1
 
         out_positions.append(
             {
@@ -1134,7 +1148,7 @@ def compute_valuation(
                 "pnl": pnl,
                 "pnl_local": pnl_local,
                 "pnl_pct": pnl_pct,
-                "currency": portfolio_currency,
+                "currency": pos_currency,
                 "position_currency": pos_currency,
                 "fx_rate": fx_rate,
                 "fx_instrument_code": fx_instrument_code,
@@ -1173,9 +1187,6 @@ class InstrumentCreate(BaseModel):
     code: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=200)
     currency: str = Field(default="EUR", min_length=3, max_length=8)
-    type: str = Field(default="asset", max_length=16)
-    base_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
-    quote_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
     isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
     ls_item: Optional[str] = Field(default=None, max_length=64)
 
@@ -1184,7 +1195,22 @@ class InstrumentUpdate(BaseModel):
     code: Optional[str] = Field(default=None, min_length=1, max_length=64)
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
-    type: Optional[str] = Field(default=None, max_length=16)
+    isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
+    ls_item: Optional[str] = Field(default=None, max_length=64)
+
+
+class FxRateCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=200)
+    base_currency: str = Field(min_length=3, max_length=8)
+    quote_currency: str = Field(min_length=3, max_length=8)
+    isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
+    ls_item: Optional[str] = Field(default=None, max_length=64)
+
+
+class FxRateUpdate(BaseModel):
+    code: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     base_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
     quote_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
     isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
@@ -1245,11 +1271,6 @@ def _normalize_currency(value: Optional[str], default: Optional[str] = "EUR") ->
     return (default or "").strip().upper()
 
 
-def _normalize_instrument_type(value: Optional[str]) -> str:
-    v = (value or "asset").strip().lower()
-    if v not in ("asset", "fx"):
-        raise HTTPException(status_code=400, detail="Instrument-Typ muss 'asset' oder 'fx' sein")
-    return v
 
 
 def _get_instrument(instrument_id: int) -> Dict[str, Any]:
@@ -1260,6 +1281,20 @@ def _get_instrument(instrument_id: int) -> Dict[str, Any]:
     row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Instrument nicht gefunden")
+    data = dict(row)
+    if (data.get("type") or "asset") == "fx" or (data.get("base_currency") and data.get("quote_currency")):
+        raise HTTPException(status_code=400, detail="FX-Instrumente duerfen nicht in Portfolios/Watchlist verwendet werden")
+    return data
+
+
+def _get_fx_rate(fx_id: int) -> Dict[str, Any]:
+    cur = _conn.execute(
+        "SELECT id, code, name, base_currency, quote_currency, isin, ls_item FROM fx_rates WHERE id=?",
+        (fx_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="FX-Instrument nicht gefunden")
     return dict(row)
 
 @app.on_event("startup")
@@ -1299,7 +1334,13 @@ async def manage():
 @app.get("/api/instruments")
 async def list_instruments() -> List[Dict[str, Any]]:
     cur = _conn.execute(
-        "SELECT id, code, name, currency, type, base_currency, quote_currency, isin, ls_item FROM instruments ORDER BY id DESC"
+        """
+        SELECT id, code, name, currency, isin, ls_item
+        FROM instruments
+        WHERE (type IS NULL OR type != 'fx')
+          AND (base_currency IS NULL OR quote_currency IS NULL)
+        ORDER BY id DESC
+        """
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -1310,18 +1351,7 @@ async def create_instrument(body: InstrumentCreate) -> Dict[str, Any]:
     if not code:
         raise HTTPException(status_code=400, detail="Instrument-Code darf nicht leer sein")
     name = (body.name or code).strip() or code
-    instr_type = _normalize_instrument_type(body.type)
-    base_currency = _normalize_currency(body.base_currency, default=None) if body.base_currency is not None else ""
-    quote_currency = _normalize_currency(body.quote_currency, default=None) if body.quote_currency is not None else ""
-    base_currency = base_currency or None
-    quote_currency = quote_currency or None
-    if instr_type == "fx":
-        if not base_currency or not quote_currency:
-            raise HTTPException(status_code=400, detail="FX-Instrument braucht Base- und Quote-Waehrung")
-    else:
-        base_currency = None
-        quote_currency = None
-    currency = _normalize_currency(body.currency, default=quote_currency or "EUR")
+    currency = _normalize_currency(body.currency)
     isin = None
     if body.isin:
         isin = validate_isin(body.isin)
@@ -1334,8 +1364,8 @@ async def create_instrument(body: InstrumentCreate) -> Dict[str, Any]:
         ls_item = ls_item.strip()
     try:
         cur = _conn.execute(
-            "INSERT INTO instruments(code, name, currency, type, base_currency, quote_currency, isin, ls_item) VALUES (?,?,?,?,?,?,?,?)",
-            (code, name, currency, instr_type, base_currency, quote_currency, isin, ls_item or None),
+            "INSERT INTO instruments(code, name, currency, type, isin, ls_item) VALUES (?,?,?,?,?,?)",
+            (code, name, currency, "asset", isin, ls_item or None),
         )
         _conn.commit()
     except Exception as e:
@@ -1351,9 +1381,6 @@ async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[
     fields: List[str] = []
     values: List[Any] = []
     new_code = instrument["code"]
-    instr_type = _normalize_instrument_type(body.type) if body.type is not None else (instrument.get("type") or "asset")
-    base_currency = instrument.get("base_currency")
-    quote_currency = instrument.get("quote_currency")
     if body.code is not None:
         code = _normalize_code(body.code)
         if not code:
@@ -1371,15 +1398,9 @@ async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[
     if body.name is not None:
         fields.append("name=?")
         values.append((body.name or "").strip() or new_code)
-
-    currency_update: Optional[str] = None
     if body.currency is not None:
-        currency_update = _normalize_currency(body.currency)
-
-    if body.base_currency is not None:
-        base_currency = _normalize_currency(body.base_currency, default=None) or None
-    if body.quote_currency is not None:
-        quote_currency = _normalize_currency(body.quote_currency, default=None) or None
+        fields.append("currency=?")
+        values.append(_normalize_currency(body.currency))
     if body.isin is not None:
         if body.isin:
             fields.append("isin=?")
@@ -1391,28 +1412,6 @@ async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[
         ls_item = (body.ls_item or "").strip()
         fields.append("ls_item=?")
         values.append(ls_item or None)
-
-    if instr_type == "fx":
-        if not base_currency or not quote_currency:
-            raise HTTPException(status_code=400, detail="FX-Instrument braucht Base- und Quote-Waehrung")
-        if currency_update is None and quote_currency:
-            currency_update = quote_currency
-    else:
-        base_currency = None
-        quote_currency = None
-
-    if body.type is not None:
-        fields.append("type=?")
-        values.append(instr_type)
-    if body.base_currency is not None or instr_type != (instrument.get("type") or "asset"):
-        fields.append("base_currency=?")
-        values.append(base_currency)
-    if body.quote_currency is not None or instr_type != (instrument.get("type") or "asset"):
-        fields.append("quote_currency=?")
-        values.append(quote_currency)
-    if currency_update is not None:
-        fields.append("currency=?")
-        values.append(currency_update)
 
     if fields:
         values.append(instrument_id)
@@ -1444,6 +1443,104 @@ async def delete_instrument(instrument_id: int) -> None:
     if used_watchlist:
         raise HTTPException(status_code=400, detail="Instrument ist in der Watchlist")
     _conn.execute("DELETE FROM instruments WHERE id=?", (instrument_id,))
+    _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return None
+
+
+@app.get("/api/fx-rates")
+async def list_fx_rates() -> List[Dict[str, Any]]:
+    cur = _conn.execute(
+        "SELECT id, code, name, base_currency, quote_currency, isin, ls_item FROM fx_rates ORDER BY id DESC"
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+@app.post("/api/fx-rates", status_code=201)
+async def create_fx_rate(body: FxRateCreate) -> Dict[str, Any]:
+    code = _normalize_code(body.code)
+    if not code:
+        raise HTTPException(status_code=400, detail="FX-Code darf nicht leer sein")
+    name = (body.name or code).strip() or code
+    base_currency = _normalize_currency(body.base_currency, default=None)
+    quote_currency = _normalize_currency(body.quote_currency, default=None)
+    if not base_currency or not quote_currency:
+        raise HTTPException(status_code=400, detail="FX braucht Base- und Quote-Waehrung")
+    isin = None
+    if body.isin:
+        isin = validate_isin(body.isin)
+    elif is_isin(code):
+        isin = code.upper()
+    ls_item = (body.ls_item or "").strip() or None
+    try:
+        cur = _conn.execute(
+            "INSERT INTO fx_rates(code, name, base_currency, quote_currency, isin, ls_item) VALUES (?,?,?,?,?,?)",
+            (code, name, base_currency, quote_currency, isin, ls_item),
+        )
+        _conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"FX-Instrument konnte nicht gespeichert werden: {e}")
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return _get_fx_rate(int(cur.lastrowid))
+
+
+@app.put("/api/fx-rates/{fx_id}")
+async def update_fx_rate(fx_id: int, body: FxRateUpdate) -> Dict[str, Any]:
+    fx = _get_fx_rate(fx_id)
+    fields: List[str] = []
+    values: List[Any] = []
+    new_code = fx["code"]
+    if body.code is not None:
+        code = _normalize_code(body.code)
+        if not code:
+            raise HTTPException(status_code=400, detail="FX-Code darf nicht leer sein")
+        new_code = code
+        fields.append("code=?")
+        values.append(code)
+    if body.name is not None:
+        fields.append("name=?")
+        values.append((body.name or "").strip() or new_code)
+    if body.base_currency is not None:
+        base_currency = _normalize_currency(body.base_currency, default=None)
+        if not base_currency:
+            raise HTTPException(status_code=400, detail="Base-Waehrung fehlt")
+        fields.append("base_currency=?")
+        values.append(base_currency)
+    if body.quote_currency is not None:
+        quote_currency = _normalize_currency(body.quote_currency, default=None)
+        if not quote_currency:
+            raise HTTPException(status_code=400, detail="Quote-Waehrung fehlt")
+        fields.append("quote_currency=?")
+        values.append(quote_currency)
+    if body.isin is not None:
+        if body.isin:
+            fields.append("isin=?")
+            values.append(validate_isin(body.isin))
+        else:
+            fields.append("isin=?")
+            values.append(None)
+    if body.ls_item is not None:
+        ls_item = (body.ls_item or "").strip()
+        fields.append("ls_item=?")
+        values.append(ls_item or None)
+    if fields:
+        values.append(fx_id)
+        try:
+            _conn.execute(f"UPDATE fx_rates SET {', '.join(fields)} WHERE id=?", tuple(values))
+            _conn.commit()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"FX-Instrument konnte nicht aktualisiert werden: {e}")
+        stream_manager.mark_dirty()
+        _publish_mqtt_snapshot()
+    return _get_fx_rate(fx_id)
+
+
+@app.delete("/api/fx-rates/{fx_id}", status_code=204)
+async def delete_fx_rate(fx_id: int) -> None:
+    _get_fx_rate(fx_id)
+    _conn.execute("DELETE FROM fx_rates WHERE id=?", (fx_id,))
     _conn.commit()
     stream_manager.mark_dirty()
     _publish_mqtt_snapshot()

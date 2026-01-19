@@ -130,10 +130,7 @@
               <tr>
                 <th>Code</th>
                 <th>Name</th>
-                <th>Typ</th>
                 <th>Waehrung</th>
-                <th>Base</th>
-                <th>Quote</th>
                 <th>ISIN</th>
                 <th>LS Item</th>
                 <th></th>
@@ -145,21 +142,50 @@
         <div class="inline-form" style="margin-top: 12px;">
           <input id="newInstrumentCode" placeholder="Instrument-ID" />
           <input id="newInstrumentName" placeholder="Name" />
-          <select id="newInstrumentType">
-            <option value="asset">Asset</option>
-            <option value="fx">FX</option>
-          </select>
           <select id="newInstrumentCurrency">
             <option value="EUR">EUR</option>
             <option value="USD">USD</option>
             <option value="CHF">CHF</option>
             <option value="GBP">GBP</option>
           </select>
-          <input id="newInstrumentBase" placeholder="Base (z.B. USD)" />
-          <input id="newInstrumentQuote" placeholder="Quote (z.B. EUR)" />
           <input id="newInstrumentIsin" placeholder="ISIN (optional)" />
           <input id="newInstrumentLsItem" placeholder="LS Item (optional)" />
           <button id="addInstrumentBtn" class="button">Anlegen</button>
+        </div>
+      </section>
+
+      <section class="card span-2">
+        <div class="inline-form" style="justify-content: space-between; align-items: flex-end;">
+          <div>
+            <h2>FX-Kurse</h2>
+            <div class="sub">Nur fuer Umrechnung (Base/Quote)</div>
+          </div>
+          <span class="pill">FX</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Name</th>
+                <th>Base</th>
+                <th>Quote</th>
+                <th>ISIN</th>
+                <th>LS Item</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="fxTbody"></tbody>
+          </table>
+        </div>
+        <div class="inline-form" style="margin-top: 12px;">
+          <input id="newFxCode" placeholder="FX-Code" />
+          <input id="newFxName" placeholder="Name" />
+          <input id="newFxBase" placeholder="Base (z.B. USD)" />
+          <input id="newFxQuote" placeholder="Quote (z.B. EUR)" />
+          <input id="newFxIsin" placeholder="ISIN (optional)" />
+          <input id="newFxLsItem" placeholder="LS Item (optional)" />
+          <button id="addFxBtn" class="button">Anlegen</button>
         </div>
       </section>
 
@@ -283,13 +309,18 @@
     const instrumentsTbody = document.getElementById("instrumentsTbody");
     const newInstrumentCode = document.getElementById("newInstrumentCode");
     const newInstrumentName = document.getElementById("newInstrumentName");
-    const newInstrumentType = document.getElementById("newInstrumentType");
     const newInstrumentCurrency = document.getElementById("newInstrumentCurrency");
-    const newInstrumentBase = document.getElementById("newInstrumentBase");
-    const newInstrumentQuote = document.getElementById("newInstrumentQuote");
     const newInstrumentIsin = document.getElementById("newInstrumentIsin");
     const newInstrumentLsItem = document.getElementById("newInstrumentLsItem");
     const addInstrumentBtn = document.getElementById("addInstrumentBtn");
+    const fxTbody = document.getElementById("fxTbody");
+    const newFxCode = document.getElementById("newFxCode");
+    const newFxName = document.getElementById("newFxName");
+    const newFxBase = document.getElementById("newFxBase");
+    const newFxQuote = document.getElementById("newFxQuote");
+    const newFxIsin = document.getElementById("newFxIsin");
+    const newFxLsItem = document.getElementById("newFxLsItem");
+    const addFxBtn = document.getElementById("addFxBtn");
 
     const portfoliosTbody = document.getElementById("portfoliosTbody");
     const newPortfolioName = document.getElementById("newPortfolioName");
@@ -319,6 +350,7 @@
 
     const state = {
       instruments: [],
+      fxRates: [],
       portfolios: [],
       activePortfolioId: null,
       positions: [],
@@ -364,10 +396,7 @@
         tr.dataset.id = String(inst.id);
         const tdCode = document.createElement("td");
         const tdName = document.createElement("td");
-        const tdType = document.createElement("td");
         const tdCurr = document.createElement("td");
-        const tdBase = document.createElement("td");
-        const tdQuote = document.createElement("td");
         const tdIsin = document.createElement("td");
         const tdLs = document.createElement("td");
         const tdActions = document.createElement("td");
@@ -376,14 +405,6 @@
         codeInput.value = inst.code || "";
         const nameInput = document.createElement("input");
         nameInput.value = inst.name || "";
-        const typeSelect = document.createElement("select");
-        ["asset", "fx"].forEach(t => {
-          const opt = document.createElement("option");
-          opt.value = t;
-          opt.textContent = t.toUpperCase();
-          typeSelect.appendChild(opt);
-        });
-        typeSelect.value = (inst.type || "asset").toLowerCase();
         const currSelect = document.createElement("select");
         ["EUR", "USD", "CHF", "GBP"].forEach(c => {
           const opt = document.createElement("option");
@@ -392,10 +413,6 @@
           currSelect.appendChild(opt);
         });
         currSelect.value = (inst.currency || "EUR").toUpperCase();
-        const baseInput = document.createElement("input");
-        baseInput.value = inst.base_currency || "";
-        const quoteInput = document.createElement("input");
-        quoteInput.value = inst.quote_currency || "";
         const isinInput = document.createElement("input");
         isinInput.value = inst.isin || "";
         const lsInput = document.createElement("input");
@@ -405,10 +422,7 @@
           const payload = {
             code: codeInput.value.trim(),
             name: nameInput.value.trim(),
-            type: typeSelect.value,
             currency: currSelect.value,
-            base_currency: baseInput.value.trim() || null,
-            quote_currency: quoteInput.value.trim() || null,
             isin: isinInput.value.trim() || null,
             ls_item: lsInput.value.trim() || null,
           };
@@ -418,7 +432,7 @@
           setStatus("success", "Instrument gespeichert.");
         };
 
-        [codeInput, nameInput, typeSelect, currSelect, baseInput, quoteInput, isinInput, lsInput].forEach(el => {
+        [codeInput, nameInput, currSelect, isinInput, lsInput].forEach(el => {
           el.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
         });
 
@@ -437,8 +451,79 @@
 
         tdCode.appendChild(codeInput);
         tdName.appendChild(nameInput);
-        tdType.appendChild(typeSelect);
         tdCurr.appendChild(currSelect);
+        tdIsin.appendChild(isinInput);
+        tdLs.appendChild(lsInput);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdCode);
+        tr.appendChild(tdName);
+        tr.appendChild(tdCurr);
+        tr.appendChild(tdIsin);
+        tr.appendChild(tdLs);
+        tr.appendChild(tdActions);
+        instrumentsTbody.appendChild(tr);
+      }
+    }
+
+    function renderFxRates() {
+      fxTbody.innerHTML = "";
+      for (const fx of state.fxRates) {
+        const tr = document.createElement("tr");
+        tr.dataset.id = String(fx.id);
+        const tdCode = document.createElement("td");
+        const tdName = document.createElement("td");
+        const tdBase = document.createElement("td");
+        const tdQuote = document.createElement("td");
+        const tdIsin = document.createElement("td");
+        const tdLs = document.createElement("td");
+        const tdActions = document.createElement("td");
+
+        const codeInput = document.createElement("input");
+        codeInput.value = fx.code || "";
+        const nameInput = document.createElement("input");
+        nameInput.value = fx.name || "";
+        const baseInput = document.createElement("input");
+        baseInput.value = fx.base_currency || "";
+        const quoteInput = document.createElement("input");
+        quoteInput.value = fx.quote_currency || "";
+        const isinInput = document.createElement("input");
+        isinInput.value = fx.isin || "";
+        const lsInput = document.createElement("input");
+        lsInput.value = fx.ls_item || "";
+
+        const saveRow = async () => {
+          const payload = {
+            code: codeInput.value.trim(),
+            name: nameInput.value.trim(),
+            base_currency: baseInput.value.trim(),
+            quote_currency: quoteInput.value.trim(),
+            isin: isinInput.value.trim() || null,
+            ls_item: lsInput.value.trim() || null,
+          };
+          setStatus("info", "Speichere FX-Instrument...");
+          await api(`/api/fx-rates/${fx.id}`, { method: "PUT", body: JSON.stringify(payload) });
+          await loadFxRates();
+          setStatus("success", "FX-Instrument gespeichert.");
+        };
+
+        [codeInput, nameInput, baseInput, quoteInput, isinInput, lsInput].forEach(el => {
+          el.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+        });
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Loeschen";
+        delBtn.onclick = async () => {
+          if (!confirm(`FX-Instrument loeschen?\\n\\n${fx.name} (${fx.code})`)) return;
+          setStatus("info", "Loesche FX-Instrument...");
+          await api(`/api/fx-rates/${fx.id}`, { method: "DELETE" });
+          await loadFxRates();
+          setStatus("success", "FX-Instrument geloescht.");
+        };
+
+        tdCode.appendChild(codeInput);
+        tdName.appendChild(nameInput);
         tdBase.appendChild(baseInput);
         tdQuote.appendChild(quoteInput);
         tdIsin.appendChild(isinInput);
@@ -447,14 +532,12 @@
 
         tr.appendChild(tdCode);
         tr.appendChild(tdName);
-        tr.appendChild(tdType);
-        tr.appendChild(tdCurr);
         tr.appendChild(tdBase);
         tr.appendChild(tdQuote);
         tr.appendChild(tdIsin);
         tr.appendChild(tdLs);
         tr.appendChild(tdActions);
-        instrumentsTbody.appendChild(tr);
+        fxTbody.appendChild(tr);
       }
     }
 
@@ -673,6 +756,11 @@
       renderWatchlist();
     }
 
+    async function loadFxRates() {
+      state.fxRates = await api("/api/fx-rates");
+      renderFxRates();
+    }
+
     async function loadPortfolios() {
       state.portfolios = await api("/api/portfolios");
       if (!state.portfolios.length) {
@@ -706,10 +794,7 @@
       const payload = {
         code,
         name,
-        type: newInstrumentType.value,
         currency: newInstrumentCurrency.value,
-        base_currency: newInstrumentBase.value.trim() || null,
-        quote_currency: newInstrumentQuote.value.trim() || null,
         isin: newInstrumentIsin.value.trim() || null,
         ls_item: newInstrumentLsItem.value.trim() || null,
       };
@@ -717,12 +802,39 @@
       await api("/api/instruments", { method: "POST", body: JSON.stringify(payload) });
       newInstrumentCode.value = "";
       newInstrumentName.value = "";
-      newInstrumentBase.value = "";
-      newInstrumentQuote.value = "";
       newInstrumentIsin.value = "";
       newInstrumentLsItem.value = "";
       await loadInstruments();
       setStatus("success", "Instrument angelegt.");
+    }
+
+    async function createFxRate() {
+      const code = newFxCode.value.trim();
+      const name = newFxName.value.trim() || code;
+      const base = newFxBase.value.trim().toUpperCase();
+      const quote = newFxQuote.value.trim().toUpperCase();
+      if (!code || !name || !base || !quote) {
+        setStatus("warn", "Bitte Code, Name, Base und Quote angeben.");
+        return;
+      }
+      const payload = {
+        code,
+        name,
+        base_currency: base,
+        quote_currency: quote,
+        isin: newFxIsin.value.trim() || null,
+        ls_item: newFxLsItem.value.trim() || null,
+      };
+      setStatus("info", "Lege FX-Instrument an...");
+      await api("/api/fx-rates", { method: "POST", body: JSON.stringify(payload) });
+      newFxCode.value = "";
+      newFxName.value = "";
+      newFxBase.value = "";
+      newFxQuote.value = "";
+      newFxIsin.value = "";
+      newFxLsItem.value = "";
+      await loadFxRates();
+      setStatus("success", "FX-Instrument angelegt.");
     }
 
     async function createPortfolio() {
@@ -838,6 +950,7 @@
     }
 
     addInstrumentBtn.onclick = () => createInstrument().catch(e => setStatus("error", String(e.message || e)));
+    addFxBtn.onclick = () => createFxRate().catch(e => setStatus("error", String(e.message || e)));
     createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
     activePortfolioSelect.onchange = () => loadPortfolio(Number(activePortfolioSelect.value)).catch(e => setStatus("error", String(e.message || e)));
     savePositionsBtn.onclick = () => savePositions().catch(e => setStatus("error", String(e.message || e)));
@@ -855,7 +968,7 @@
       if (inst && inst.currency) newWatchCurrency.value = inst.currency;
     };
 
-    Promise.all([loadInstruments(), loadPortfolios(), loadWatchlist(), loadMqttStatus()])
+    Promise.all([loadInstruments(), loadFxRates(), loadPortfolios(), loadWatchlist(), loadMqttStatus()])
       .then(() => setStatus("success", "Bereit."))
       .catch(e => setStatus("error", String(e.message || e)));
   </script>

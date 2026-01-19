@@ -31,9 +31,17 @@ def init_db(conn: sqlite3.Connection) -> None:
           code TEXT NOT NULL UNIQUE,
           name TEXT NOT NULL,
           currency TEXT NOT NULL DEFAULT 'EUR',
-          type TEXT NOT NULL DEFAULT 'asset',
-          base_currency TEXT,
-          quote_currency TEXT,
+          isin TEXT,
+          ls_item TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS fx_rates (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          base_currency TEXT NOT NULL,
+          quote_currency TEXT NOT NULL,
           isin TEXT,
           ls_item TEXT,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -178,6 +186,50 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     try:
         conn.execute("UPDATE instruments SET type='asset' WHERE type IS NULL OR type=''")
+    except Exception:
+        pass
+
+    try:
+        fx_rows = conn.execute(
+            """
+            SELECT id, code, name, base_currency, quote_currency, isin, ls_item
+            FROM instruments
+            WHERE type='fx' OR (base_currency IS NOT NULL AND quote_currency IS NOT NULL)
+            """
+        ).fetchall()
+        for row in fx_rows:
+            base = (row["base_currency"] or "").strip().upper()
+            quote = (row["quote_currency"] or "").strip().upper()
+            if not base or not quote:
+                continue
+            exists = conn.execute("SELECT 1 FROM fx_rates WHERE code=?", (row["code"],)).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO fx_rates(code, name, base_currency, quote_currency, isin, ls_item) VALUES (?,?,?,?,?,?)",
+                    (
+                        row["code"],
+                        row["name"] or row["code"],
+                        base,
+                        quote,
+                        row["isin"],
+                        row["ls_item"],
+                    ),
+                )
+            used = conn.execute(
+                "SELECT 1 FROM positions WHERE instrument_id=? LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            used_watch = conn.execute(
+                "SELECT 1 FROM watchlist WHERE instrument_id=? LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if not used and not used_watch:
+                conn.execute("DELETE FROM instruments WHERE id=?", (row["id"],))
+            else:
+                conn.execute(
+                    "UPDATE instruments SET type='asset', base_currency=NULL, quote_currency=NULL WHERE id=?",
+                    (row["id"],),
+                )
     except Exception:
         pass
 
