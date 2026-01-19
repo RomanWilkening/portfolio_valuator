@@ -16,6 +16,15 @@ from websockets.exceptions import ConnectionClosed
 
 from app.db import connect_db, init_db
 from app.mqtt_ha import HomeAssistantMqttPublisher, load_mqtt_settings
+from app.quote_sources import (
+    SOURCE_LIGHTSTREAMER,
+    SOURCE_TRADEGATE,
+    QuoteRouter,
+    TradegatePoller,
+    is_isin,
+    load_tradegate_settings,
+    parse_source_priority,
+)
 from app.settings import get_bool, set_bool
 
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +63,15 @@ LS_RECONNECT_MAX_S = float(os.getenv("LS_RECONNECT_MAX_S", "30.0"))
 # If we don't receive any WS message for this long, consider the stream stuck and reconnect.
 LS_RECV_TIMEOUT_S = float(os.getenv("LS_RECV_TIMEOUT_S", "35.0"))
 LS_STALE_RESTART_S = float(os.getenv("LS_STALE_RESTART_S", "90.0"))
+
+# Kursquellen-Prioritaet (links = hoechste Prioritaet)
+QUOTE_SOURCE_PRIORITY = parse_source_priority(os.getenv("QUOTE_SOURCE_PRIORITY"))
+_KNOWN_SOURCES = {SOURCE_LIGHTSTREAMER, SOURCE_TRADEGATE}
+_UNKNOWN_SOURCES = [s for s in QUOTE_SOURCE_PRIORITY if s not in _KNOWN_SOURCES]
+if _UNKNOWN_SOURCES:
+    logger.warning("Unbekannte Kursquelle in QUOTE_SOURCE_PRIORITY: %s", ", ".join(_UNKNOWN_SOURCES))
+
+TRADEGATE_SETTINGS = load_tradegate_settings()
 
 # Für Streaming + Bewertung nutzen wir das „volle“ Schema (wie aus dem Browser beobachtet),
 # damit auch andere Item-Typen (z.B. Indizes) sauber funktionieren.
@@ -448,19 +466,59 @@ class StreamManager:
         self._dirty = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
-        # Cache: letzte Quotes je Key (ISIN oder X...)
-        self.bids: Dict[str, float] = {}
-        # Watchlist-Kurse (können reference/last/bid/ask sein)
-        self.watch_prices: Dict[str, float] = {}
-        self.watch_fields: Dict[str, str] = {}
+        self.quote_router = QuoteRouter(QUOTE_SOURCE_PRIORITY)
+        self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.priority
+        self.tradegate_poller: Optional[TradegatePoller] = None
+        if SOURCE_TRADEGATE in self.quote_router.priority:
+            self.tradegate_poller = TradegatePoller(
+                settings=TRADEGATE_SETTINGS,
+                router=self.quote_router,
+                on_best_update=self._on_source_update,
+            )
 
     def start(self) -> None:
         if self._task and not self._task.done():
+            if self.tradegate_poller:
+                self.tradegate_poller.start()
             return
         self._task = asyncio.create_task(self._run())
+        if self.tradegate_poller:
+            self.tradegate_poller.start()
 
     def mark_dirty(self) -> None:
         self._dirty.set()
+
+    async def _on_source_update(self, key: str, quotetime: Optional[str]) -> None:
+        await self._broadcast_best_quote(key, quotetime=quotetime)
+        _publish_mqtt_snapshot()
+
+    async def _broadcast_best_quote(
+        self,
+        key: str,
+        *,
+        quotetime: Optional[str] = None,
+        isin: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> None:
+        bid = self.quote_router.best_bids.get(key)
+        watch_price = self.quote_router.best_watch_prices.get(key)
+        watch_field = self.quote_router.best_watch_fields.get(key)
+        bid_source = self.quote_router.best_bid_source.get(key)
+        watch_source = self.quote_router.best_watch_source.get(key)
+        await self.broadcast(
+            {
+                "type": "quote",
+                "key": key,
+                "isin": isin or key,
+                "symbol": symbol,
+                "bid": bid,
+                "bid_source": bid_source,
+                "watch_price": watch_price,
+                "watch_field": watch_field,
+                "watch_source": watch_source,
+                "quotetime": quotetime or now_iso(),
+            }
+        )
 
     async def add_client(self, ws: WebSocket) -> None:
         self.clients.add(ws)
@@ -475,15 +533,15 @@ class StreamManager:
             {
                 "type": "snapshot",
                 "valuations": compute_all_valuations_from_bids(bids),
-                "watchlist": compute_watchlist_from_prices(watch_prices, self.watch_fields),
+                "watchlist": compute_watchlist_from_prices(watch_prices, self.quote_router.best_watch_fields),
             }
         )
 
     def _bids_as_optional(self) -> Dict[str, Optional[float]]:
-        return {k: float(v) for k, v in self.bids.items()}
+        return {k: float(v) for k, v in self.quote_router.best_bids.items()}
 
     def _watch_prices_as_optional(self) -> Dict[str, Optional[float]]:
-        return {k: float(v) for k, v in self.watch_prices.items()}
+        return {k: float(v) for k, v in self.quote_router.best_watch_prices.items()}
 
     async def remove_client(self, ws: WebSocket) -> None:
         self.clients.discard(ws)
@@ -511,7 +569,12 @@ class StreamManager:
                 # Stream läuft, wenn entweder Dashboard-Clients verbunden sind ODER MQTT enabled ist.
                 # So kann MQTT auch ohne geöffnetes Frontend 24/7 Updates bekommen.
                 need_stream = bool(self.clients) or _mqtt_is_enabled()
+                if self.tradegate_poller:
+                    self.tradegate_poller.set_enabled(need_stream)
+                    if not need_stream:
+                        self.tradegate_poller.set_keys(set())
                 if not need_stream:
+                    last_items = []
                     await asyncio.sleep(0.5)
                     continue
 
@@ -545,6 +608,34 @@ class StreamManager:
                 # reset dirty
                 self._dirty.clear()
                 last_items = items
+                all_keys = [t[1] for t in targets]
+                self.quote_router.trim_keys(all_keys)
+                if self.tradegate_poller:
+                    tradegate_isins: set[str] = set()
+                    for isin in portfolio_isins:
+                        if is_isin(isin):
+                            tradegate_isins.add(isin)
+                    for code in watch_codes:
+                        if is_isin(code):
+                            tradegate_isins.add(code)
+                    self.tradegate_poller.set_keys(tradegate_isins)
+
+                if not self.lightstreamer_enabled:
+                    if not items:
+                        await self.broadcast(
+                            {"type": "status", "level": "warn", "message": "Keine Positionen/Watchlist vorhanden – kein Stream."}
+                        )
+                    bids = self._bids_as_optional()
+                    watch_prices = self._watch_prices_as_optional()
+                    await self.broadcast(
+                        {
+                            "type": "snapshot",
+                            "valuations": compute_all_valuations_from_bids(bids),
+                            "watchlist": compute_watchlist_from_prices(watch_prices, self.quote_router.best_watch_fields),
+                        }
+                    )
+                    await asyncio.sleep(0.5)
+                    continue
 
                 if not items:
                     await self.broadcast({"type": "status", "level": "warn", "message": "Keine Positionen/Watchlist vorhanden – kein Stream."})
@@ -622,13 +713,21 @@ class StreamManager:
                         # update cache and broadcast quote
                         key = evt.get("key") or evt.get("isin")
                         if key:
-                            if evt.get("bid") is not None:
-                                self.bids[key] = float(evt["bid"])
-                            if evt.get("watch_price") is not None and evt.get("watch_field"):
-                                self.watch_prices[key] = float(evt["watch_price"])
-                                self.watch_fields[key] = str(evt["watch_field"])
-                        await self.broadcast(evt)
-                        _publish_mqtt_snapshot()
+                            changed = self.quote_router.update_from_source(
+                                source=SOURCE_LIGHTSTREAMER,
+                                key=key,
+                                bid=evt.get("bid"),
+                                watch_price=evt.get("watch_price"),
+                                watch_field=evt.get("watch_field"),
+                            )
+                            if changed:
+                                await self._broadcast_best_quote(
+                                    key,
+                                    quotetime=evt.get("quotetime"),
+                                    isin=evt.get("isin"),
+                                    symbol=evt.get("symbol"),
+                                )
+                                _publish_mqtt_snapshot()
                     else:
                         # no break in for-loop
                         continue
@@ -647,7 +746,7 @@ class StreamManager:
                     {
                         "type": "snapshot",
                         "valuations": compute_all_valuations_from_bids(bids),
-                        "watchlist": compute_watchlist_from_prices(watch_prices, self.watch_fields),
+                        "watchlist": compute_watchlist_from_prices(watch_prices, self.quote_router.best_watch_fields),
                     }
                 )
                 # If we ended the session without a "dirty" restart request, force reconnect.
@@ -682,7 +781,7 @@ def _publish_mqtt_snapshot() -> None:
     bids = stream_manager._bids_as_optional()
     watch_prices = stream_manager._watch_prices_as_optional()
     portfolios = compute_all_valuations_from_bids(bids)
-    watchlist = compute_watchlist_from_prices(watch_prices, stream_manager.watch_fields)
+    watchlist = compute_watchlist_from_prices(watch_prices, stream_manager.quote_router.best_watch_fields)
     _mqtt.publish_all(portfolios=portfolios, watchlist=watchlist)
 
 
@@ -896,6 +995,8 @@ async def _shutdown() -> None:
             await stream_manager._task
         except Exception:
             pass
+    if stream_manager.tradegate_poller:
+        stream_manager.tradegate_poller.stop()
     _mqtt_disconnect()
 
 
@@ -997,8 +1098,8 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
             seen.add(isin)
             all_isins.append(isin)
 
-    # Für Dashboard: Snapshot aus dem aktuellen Bid-Cache (Stream).
-    # Fallback: falls Stream noch nichts gesehen hat, werden bids als None angezeigt.
+    # Für Dashboard: Snapshot aus dem aktuellen Kurs-Cache (beste Quelle).
+    # Fallback: falls noch kein Kurs gesehen wurde, werden bids als None angezeigt.
     stream_manager.start()
     bids = stream_manager._bids_as_optional()
     # asks werden separat für Watchlist im Snapshot per WS genutzt
@@ -1120,8 +1221,7 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
     if not positions:
         return compute_valuation(dict(portfolio), [], {}, valued_at=valued_at, timeout_s=0.0)
 
-    isins = [p["isin"] for p in positions]
-    # Einzelbewertung nutzt ebenfalls den Cache (keine eigene LS-Session), damit Streaming „single source of truth“ ist.
+    # Einzelbewertung nutzt den Kurs-Cache (keine eigene LS-Session), damit die Quellen-Prioritaet konsistent bleibt.
     stream_manager.start()
     bids = stream_manager._bids_as_optional()
     return compute_valuation(dict(portfolio), positions, bids, valued_at=valued_at, timeout_s=0.0)
