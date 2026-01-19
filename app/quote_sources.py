@@ -47,11 +47,16 @@ class QuoteRouter:
             self.priority = list(DEFAULT_SOURCE_PRIORITY)
 
         self.source_bids: Dict[str, Dict[str, float]] = {s: {} for s in self.priority}
+        self.source_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.priority}
+        self.source_price_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.priority}
         self.source_watch_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.priority}
         self.source_watch_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.priority}
 
         self.best_bids: Dict[str, float] = {}
         self.best_bid_source: Dict[str, str] = {}
+        self.best_prices: Dict[str, float] = {}
+        self.best_price_source: Dict[str, str] = {}
+        self.best_price_field: Dict[str, str] = {}
         self.best_watch_prices: Dict[str, float] = {}
         self.best_watch_fields: Dict[str, str] = {}
         self.best_watch_source: Dict[str, str] = {}
@@ -77,6 +82,30 @@ class QuoteRouter:
             self.best_bids[key] = float(new_bid)
             assert new_src is not None
             self.best_bid_source[key] = new_src
+            return True
+        return False
+
+    def _refresh_best_price(self, key: str) -> bool:
+        new_price, new_src = self._pick_best(self.source_prices, key)
+        old_price = self.best_prices.get(key)
+        old_src = self.best_price_source.get(key)
+        old_field = self.best_price_field.get(key)
+        if new_price is None:
+            if old_price is None and old_src is None:
+                return False
+            self.best_prices.pop(key, None)
+            self.best_price_source.pop(key, None)
+            self.best_price_field.pop(key, None)
+            return True
+        assert new_src is not None
+        new_field = self.source_price_fields.get(new_src, {}).get(key)
+        if old_price != new_price or old_src != new_src or old_field != new_field:
+            self.best_prices[key] = float(new_price)
+            self.best_price_source[key] = new_src
+            if new_field is not None:
+                self.best_price_field[key] = new_field
+            else:
+                self.best_price_field.pop(key, None)
             return True
         return False
 
@@ -110,6 +139,8 @@ class QuoteRouter:
         source: str,
         key: str,
         bid: Optional[float] = None,
+        price: Optional[float] = None,
+        price_field: Optional[str] = None,
         watch_price: Optional[float] = None,
         watch_field: Optional[str] = None,
     ) -> bool:
@@ -120,6 +151,11 @@ class QuoteRouter:
         if bid is not None:
             self.source_bids.setdefault(src, {})[key] = float(bid)
             changed = self._refresh_best_bid(key) or changed
+        if price is not None:
+            self.source_prices.setdefault(src, {})[key] = float(price)
+            if price_field is not None:
+                self.source_price_fields.setdefault(src, {})[key] = str(price_field)
+            changed = self._refresh_best_price(key) or changed
         if watch_price is not None:
             self.source_watch_prices.setdefault(src, {})[key] = float(watch_price)
             if watch_field is not None:
@@ -135,12 +171,24 @@ class QuoteRouter:
                 if key not in keep_set:
                     self.source_bids[src].pop(key, None)
                     changed = True
+        for src in list(self.source_prices.keys()):
+            for key in list(self.source_prices.get(src, {}).keys()):
+                if key not in keep_set:
+                    self.source_prices[src].pop(key, None)
+                    self.source_price_fields.get(src, {}).pop(key, None)
+                    changed = True
         for src in list(self.source_watch_prices.keys()):
             for key in list(self.source_watch_prices.get(src, {}).keys()):
                 if key not in keep_set:
                     self.source_watch_prices[src].pop(key, None)
                     self.source_watch_fields.get(src, {}).pop(key, None)
                     changed = True
+        for key in list(self.best_prices.keys()):
+            if key not in keep_set:
+                self.best_prices.pop(key, None)
+                self.best_price_source.pop(key, None)
+                self.best_price_field.pop(key, None)
+                changed = True
         for key in list(self.best_bids.keys()):
             if key not in keep_set:
                 self.best_bids.pop(key, None)
@@ -281,15 +329,18 @@ class TradegatePoller:
                     payload = await asyncio.to_thread(self.client.fetch, isin)
                     if not payload:
                         continue
+                    bid = _parse_tradegate_number(payload.get("bid"))
                     price, field = parse_tradegate_price(payload)
                     if price is None:
                         continue
                     changed = self.router.update_from_source(
                         source=SOURCE_TRADEGATE,
                         key=key,
-                        bid=price,
+                        bid=bid,
+                        price=price,
+                        price_field=field,
                         watch_price=price,
-                        watch_field=field,
+                        watch_field=None,
                     )
                     if changed:
                         await self.on_best_update(key, now_iso())

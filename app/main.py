@@ -366,6 +366,9 @@ class LightstreamerSession:
         if bid is None and ask is None and reference is None and last is None:
             return None
 
+        def _valid_price(val: Optional[float]) -> bool:
+            return val is not None and val != 0.0
+
         # Watchlist-Preis: bei Index-/Underlying-Items ist meist reference relevant (bid/ask/last können 0/# sein)
         def pick_watch_price() -> tuple[Optional[float], Optional[str]]:
             candidates: List[tuple[str, Optional[float]]] = [
@@ -376,7 +379,7 @@ class LightstreamerSession:
             ]
             # Prefer non-zero values first (0.0000 ist bei einigen Items nur Platzhalter)
             for name, val in candidates:
-                if val is not None and val != 0.0:
+                if _valid_price(val):
                     return val, name
             for name, val in candidates:
                 if val is not None:
@@ -385,6 +388,21 @@ class LightstreamerSession:
 
         watch_price, watch_field = pick_watch_price()
 
+        def pick_valuation_price() -> tuple[Optional[float], Optional[str]]:
+            if _valid_price(bid):
+                return bid, "bid"
+            if bid is not None and ask is not None and ask != 0.0:
+                return (bid + ask) / 2.0, "mid"
+            if _valid_price(reference):
+                return reference, "reference"
+            if _valid_price(last):
+                return last, "last"
+            if _valid_price(ask):
+                return ask, "ask"
+            return None, None
+
+        price, price_field = pick_valuation_price()
+
         # Für Portfolio-Updates ist key typischerweise ISIN. Für Indizes (X...) bleibt key die Item-ID.
         return {
             "type": "quote",
@@ -392,6 +410,8 @@ class LightstreamerSession:
             "isin": symbol or key,
             "symbol": symbol,
             "bid": bid,
+            "price": price,
+            "price_field": price_field,
             "ask": ask,
             "reference": reference,
             "last": last,
@@ -440,13 +460,30 @@ def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dic
     return portfolios, by_portfolio, all_codes
 
 
-def compute_all_valuations_from_bids(bids: Dict[str, Optional[float]]) -> List[Dict[str, Any]]:
+def compute_all_valuations_from_prices(
+    prices: Dict[str, Optional[float]],
+    bids: Dict[str, Optional[float]],
+    price_sources: Dict[str, str],
+) -> List[Dict[str, Any]]:
     portfolios, by_portfolio, _ = _load_portfolios_and_positions(_conn)
+    instruments = load_stream_instruments(_conn)
+    fx_rates = build_fx_rates(prices, instruments)
     valued_at = now_iso()
     out: List[Dict[str, Any]] = []
     for pf in portfolios:
         pid = int(pf["id"])
-        out.append(compute_valuation(pf, by_portfolio.get(pid, []), bids, valued_at=valued_at, timeout_s=0.0))
+        out.append(
+            compute_valuation(
+                pf,
+                by_portfolio.get(pid, []),
+                prices,
+                bids,
+                price_sources,
+                fx_rates,
+                valued_at=valued_at,
+                timeout_s=0.0,
+            )
+        )
     return out
 
 
@@ -474,12 +511,22 @@ def load_watchlist(conn) -> List[Dict[str, Any]]:
 def load_stream_instruments(conn) -> List[Dict[str, Any]]:
     cur = conn.execute(
         """
-        SELECT id, code, name, currency, isin, ls_item
+        SELECT id, code, name, currency, isin, ls_item, type, base_currency, quote_currency
         FROM instruments
         WHERE id IN (
             SELECT instrument_id FROM positions
             UNION
             SELECT instrument_id FROM watchlist
+            UNION
+            SELECT fx.id
+            FROM instruments fx
+            JOIN positions pos ON pos.currency = fx.base_currency
+            JOIN portfolios pf ON pf.id = pos.portfolio_id
+            WHERE fx.type = 'fx'
+              AND (
+                (fx.base_currency = pos.currency AND fx.quote_currency = pf.currency)
+                OR (fx.base_currency = pf.currency AND fx.quote_currency = pos.currency)
+              )
         )
         ORDER BY id DESC
         """
@@ -487,9 +534,32 @@ def load_stream_instruments(conn) -> List[Dict[str, Any]]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def build_fx_rates(
+    prices: Dict[str, Optional[float]],
+    instruments: List[Dict[str, Any]],
+) -> Dict[tuple[str, str], Dict[str, Any]]:
+    rates: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for instr in instruments:
+        if (instr.get("type") or "asset") != "fx":
+            continue
+        base = _normalize_currency(instr.get("base_currency") or "", default=None)
+        quote = _normalize_currency(instr.get("quote_currency") or instr.get("currency") or "", default=None)
+        if not base or not quote:
+            continue
+        code = instr.get("code")
+        if not code:
+            continue
+        price = prices.get(code)
+        if price is None:
+            continue
+        rates[(base, quote)] = {"rate": float(price), "instrument_code": code}
+    return rates
+
+
 def compute_watchlist_from_prices(
     prices: Dict[str, Optional[float]],
     fields: Optional[Dict[str, str]] = None,
+    sources: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     items = load_watchlist(_conn)
     out: List[Dict[str, Any]] = []
@@ -506,6 +576,7 @@ def compute_watchlist_from_prices(
                 "currency": it.get("currency") or it.get("instrument_currency") or "EUR",
                 "price": prices.get(key),
                 "field": (fields or {}).get(key),
+                "price_source": (sources or {}).get(key),
             }
         )
     return out
@@ -554,9 +625,12 @@ class StreamManager:
         symbol: Optional[str] = None,
     ) -> None:
         bid = self.quote_router.best_bids.get(key)
+        price = self.quote_router.best_prices.get(key)
         watch_price = self.quote_router.best_watch_prices.get(key)
         watch_field = self.quote_router.best_watch_fields.get(key)
         bid_source = self.quote_router.best_bid_source.get(key)
+        price_source = self.quote_router.best_price_source.get(key)
+        price_field = self.quote_router.best_price_field.get(key)
         watch_source = self.quote_router.best_watch_source.get(key)
         instrument = self.instrument_by_code.get(key, {})
         await self.broadcast(
@@ -569,7 +643,10 @@ class StreamManager:
                 "instrument_name": instrument.get("name") or instrument.get("instrument_name"),
                 "symbol": symbol,
                 "bid": bid,
+                "price": price,
+                "price_field": price_field,
                 "bid_source": bid_source,
+                "price_source": price_source,
                 "watch_price": watch_price,
                 "watch_field": watch_field,
                 "watch_source": watch_source,
@@ -585,17 +662,29 @@ class StreamManager:
 
         # Initial snapshot (valuations + watchlist based on cached bids)
         bids = self._bids_as_optional()
+        prices = self._prices_as_optional()
         watch_prices = self._watch_prices_as_optional()
         await ws.send_json(
             {
                 "type": "snapshot",
-                "valuations": compute_all_valuations_from_bids(bids),
-                "watchlist": compute_watchlist_from_prices(watch_prices, self.quote_router.best_watch_fields),
+                "valuations": compute_all_valuations_from_prices(
+                    prices,
+                    bids,
+                    self.quote_router.best_price_source,
+                ),
+                "watchlist": compute_watchlist_from_prices(
+                    watch_prices,
+                    self.quote_router.best_watch_fields,
+                    self.quote_router.best_watch_source,
+                ),
             }
         )
 
     def _bids_as_optional(self) -> Dict[str, Optional[float]]:
         return {k: float(v) for k, v in self.quote_router.best_bids.items()}
+
+    def _prices_as_optional(self) -> Dict[str, Optional[float]]:
+        return {k: float(v) for k, v in self.quote_router.best_prices.items()}
 
     def _watch_prices_as_optional(self) -> Dict[str, Optional[float]]:
         return {k: float(v) for k, v in self.quote_router.best_watch_prices.items()}
@@ -677,12 +766,21 @@ class StreamManager:
                             {"type": "status", "level": "warn", "message": "Keine Positionen/Watchlist vorhanden – kein Stream."}
                         )
                     bids = self._bids_as_optional()
+                    prices = self._prices_as_optional()
                     watch_prices = self._watch_prices_as_optional()
                     await self.broadcast(
                         {
                             "type": "snapshot",
-                            "valuations": compute_all_valuations_from_bids(bids),
-                            "watchlist": compute_watchlist_from_prices(watch_prices, self.quote_router.best_watch_fields),
+                            "valuations": compute_all_valuations_from_prices(
+                                prices,
+                                bids,
+                                self.quote_router.best_price_source,
+                            ),
+                            "watchlist": compute_watchlist_from_prices(
+                                watch_prices,
+                                self.quote_router.best_watch_fields,
+                                self.quote_router.best_watch_source,
+                            ),
                         }
                     )
                     await asyncio.sleep(0.5)
@@ -768,6 +866,8 @@ class StreamManager:
                                 source=SOURCE_LIGHTSTREAMER,
                                 key=key,
                                 bid=evt.get("bid"),
+                                price=evt.get("price"),
+                                price_field=evt.get("price_field"),
                                 watch_price=evt.get("watch_price"),
                                 watch_field=evt.get("watch_field"),
                             )
@@ -792,12 +892,21 @@ class StreamManager:
 
                 # On restart, also push a fresh snapshot to align UI state.
                 bids = self._bids_as_optional()
+                prices = self._prices_as_optional()
                 watch_prices = self._watch_prices_as_optional()
                 await self.broadcast(
                     {
                         "type": "snapshot",
-                        "valuations": compute_all_valuations_from_bids(bids),
-                        "watchlist": compute_watchlist_from_prices(watch_prices, self.quote_router.best_watch_fields),
+                        "valuations": compute_all_valuations_from_prices(
+                            prices,
+                            bids,
+                            self.quote_router.best_price_source,
+                        ),
+                        "watchlist": compute_watchlist_from_prices(
+                            watch_prices,
+                            self.quote_router.best_watch_fields,
+                            self.quote_router.best_watch_source,
+                        ),
                     }
                 )
                 # If we ended the session without a "dirty" restart request, force reconnect.
@@ -830,9 +939,18 @@ def _publish_mqtt_snapshot() -> None:
     if not _mqtt or not _mqtt_is_enabled():
         return
     bids = stream_manager._bids_as_optional()
+    prices = stream_manager._prices_as_optional()
     watch_prices = stream_manager._watch_prices_as_optional()
-    portfolios = compute_all_valuations_from_bids(bids)
-    watchlist = compute_watchlist_from_prices(watch_prices, stream_manager.quote_router.best_watch_fields)
+    portfolios = compute_all_valuations_from_prices(
+        prices,
+        bids,
+        stream_manager.quote_router.best_price_source,
+    )
+    watchlist = compute_watchlist_from_prices(
+        watch_prices,
+        stream_manager.quote_router.best_watch_fields,
+        stream_manager.quote_router.best_watch_source,
+    )
     _mqtt.publish_all(portfolios=portfolios, watchlist=watchlist)
 
 
@@ -925,29 +1043,75 @@ async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Opti
 def compute_valuation(
     portfolio: Dict[str, Any],
     positions: List[Dict[str, Any]],
+    prices: Dict[str, Optional[float]],
     bids: Dict[str, Optional[float]],
+    price_sources: Dict[str, str],
+    fx_rates: Dict[tuple[str, str], Dict[str, Any]],
     valued_at: str,
     timeout_s: float,
 ) -> Dict[str, Any]:
     out_positions: List[Dict[str, Any]] = []
     total_mv = 0.0
     total_cb = 0.0
+    total_missing_fx = 0
 
+    portfolio_currency = _normalize_currency((portfolio or {}).get("currency") or "EUR")
     for p in positions:
         code = p.get("instrument_code") or p.get("isin")
         qty = float(p["quantity"])
         entry = float(p["entry_price"])
         bid = bids.get(code)
-        pos_currency = (p.get("position_currency") or p.get("currency") or p.get("instrument_currency") or "EUR").strip().upper()
+        price = prices.get(code)
+        if price is None and bid is not None:
+            price = bid
+        price_source = (price_sources or {}).get(code)
+        if price_source is None and bid is not None:
+            price_source = "bid"
+        pos_currency = _normalize_currency(p.get("position_currency") or p.get("currency") or p.get("instrument_currency") or "EUR")
 
-        cost_basis = entry * qty
-        market_value = (bid * qty) if bid is not None else None
-        pnl = (market_value - cost_basis) if market_value is not None else None
-        pnl_pct = (pnl / cost_basis) if (pnl is not None and cost_basis != 0) else None
+        cost_basis_local = entry * qty
+        market_value_local = (price * qty) if price is not None else None
+        pnl_local = (market_value_local - cost_basis_local) if market_value_local is not None else None
+
+        fx_rate: Optional[float] = None
+        fx_instrument_code: Optional[str] = None
+        fx_inverted = False
+        fx_missing = False
+
+        if pos_currency != portfolio_currency:
+            fx_info = fx_rates.get((pos_currency, portfolio_currency))
+            if fx_info:
+                fx_rate = float(fx_info["rate"])
+                fx_instrument_code = fx_info.get("instrument_code")
+            else:
+                fx_info = fx_rates.get((portfolio_currency, pos_currency))
+                if fx_info and fx_info.get("rate"):
+                    fx_rate = 1.0 / float(fx_info["rate"])
+                    fx_instrument_code = fx_info.get("instrument_code")
+                    fx_inverted = True
+            if fx_rate is None:
+                fx_missing = True
+
+        if pos_currency == portfolio_currency:
+            market_value = market_value_local
+            cost_basis = cost_basis_local
+            pnl = pnl_local
+        elif fx_rate is not None:
+            market_value = (market_value_local * fx_rate) if market_value_local is not None else None
+            cost_basis = cost_basis_local * fx_rate
+            pnl = (market_value - cost_basis) if market_value is not None else None
+        else:
+            market_value = None
+            cost_basis = None
+            pnl = None
+            total_missing_fx += 1
+
+        pnl_pct = (pnl / cost_basis) if (pnl is not None and cost_basis) else None
 
         if market_value is not None:
             total_mv += market_value
-        total_cb += cost_basis
+        if cost_basis is not None:
+            total_cb += cost_basis
 
         out_positions.append(
             {
@@ -958,14 +1122,24 @@ def compute_valuation(
                 "instrument_name": p.get("instrument_name"),
                 "instrument_isin": p.get("instrument_isin"),
                 "instrument_ls_item": p.get("instrument_ls_item"),
+                "price": price,
+                "price_source": price_source,
                 "quantity": qty,
                 "entry_price": entry,
                 "bid": bid,
                 "market_value": market_value,
+                "market_value_local": market_value_local,
                 "cost_basis": cost_basis,
+                "cost_basis_local": cost_basis_local,
                 "pnl": pnl,
+                "pnl_local": pnl_local,
                 "pnl_pct": pnl_pct,
-                "currency": pos_currency,
+                "currency": portfolio_currency,
+                "position_currency": pos_currency,
+                "fx_rate": fx_rate,
+                "fx_instrument_code": fx_instrument_code,
+                "fx_inverted": fx_inverted,
+                "fx_missing": fx_missing,
             }
         )
 
@@ -974,7 +1148,7 @@ def compute_valuation(
 
     return {
         "portfolio": dict(portfolio),
-        "currency": (portfolio or {}).get("currency") or "EUR",
+        "currency": portfolio_currency,
         "valued_at": valued_at,
         "positions": out_positions,
         "totals": {
@@ -983,7 +1157,7 @@ def compute_valuation(
             "pnl": total_pnl,
             "pnl_pct": total_pnl_pct,
         },
-        "meta": {"quote_timeout_s": timeout_s},
+        "meta": {"quote_timeout_s": timeout_s, "fx_missing_count": total_missing_fx},
     }
 
 
@@ -999,6 +1173,9 @@ class InstrumentCreate(BaseModel):
     code: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=200)
     currency: str = Field(default="EUR", min_length=3, max_length=8)
+    type: str = Field(default="asset", max_length=16)
+    base_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
+    quote_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
     isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
     ls_item: Optional[str] = Field(default=None, max_length=64)
 
@@ -1007,6 +1184,9 @@ class InstrumentUpdate(BaseModel):
     code: Optional[str] = Field(default=None, min_length=1, max_length=64)
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
+    type: Optional[str] = Field(default=None, max_length=16)
+    base_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
+    quote_currency: Optional[str] = Field(default=None, min_length=3, max_length=8)
     isin: Optional[str] = Field(default=None, min_length=12, max_length=12)
     ls_item: Optional[str] = Field(default=None, max_length=64)
 
@@ -1058,13 +1238,23 @@ def _normalize_code(code: str) -> str:
     return code
 
 
-def _normalize_currency(value: Optional[str], default: str = "EUR") -> str:
-    return (value or default).strip().upper()
+def _normalize_currency(value: Optional[str], default: Optional[str] = "EUR") -> str:
+    v = (value or "").strip().upper()
+    if v:
+        return v
+    return (default or "").strip().upper()
+
+
+def _normalize_instrument_type(value: Optional[str]) -> str:
+    v = (value or "asset").strip().lower()
+    if v not in ("asset", "fx"):
+        raise HTTPException(status_code=400, detail="Instrument-Typ muss 'asset' oder 'fx' sein")
+    return v
 
 
 def _get_instrument(instrument_id: int) -> Dict[str, Any]:
     cur = _conn.execute(
-        "SELECT id, code, name, currency, isin, ls_item FROM instruments WHERE id=?",
+        "SELECT id, code, name, currency, type, base_currency, quote_currency, isin, ls_item FROM instruments WHERE id=?",
         (instrument_id,),
     )
     row = cur.fetchone()
@@ -1109,7 +1299,7 @@ async def manage():
 @app.get("/api/instruments")
 async def list_instruments() -> List[Dict[str, Any]]:
     cur = _conn.execute(
-        "SELECT id, code, name, currency, isin, ls_item FROM instruments ORDER BY id DESC"
+        "SELECT id, code, name, currency, type, base_currency, quote_currency, isin, ls_item FROM instruments ORDER BY id DESC"
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -1120,7 +1310,18 @@ async def create_instrument(body: InstrumentCreate) -> Dict[str, Any]:
     if not code:
         raise HTTPException(status_code=400, detail="Instrument-Code darf nicht leer sein")
     name = (body.name or code).strip() or code
-    currency = _normalize_currency(body.currency)
+    instr_type = _normalize_instrument_type(body.type)
+    base_currency = _normalize_currency(body.base_currency, default=None) if body.base_currency is not None else ""
+    quote_currency = _normalize_currency(body.quote_currency, default=None) if body.quote_currency is not None else ""
+    base_currency = base_currency or None
+    quote_currency = quote_currency or None
+    if instr_type == "fx":
+        if not base_currency or not quote_currency:
+            raise HTTPException(status_code=400, detail="FX-Instrument braucht Base- und Quote-Waehrung")
+    else:
+        base_currency = None
+        quote_currency = None
+    currency = _normalize_currency(body.currency, default=quote_currency or "EUR")
     isin = None
     if body.isin:
         isin = validate_isin(body.isin)
@@ -1133,8 +1334,8 @@ async def create_instrument(body: InstrumentCreate) -> Dict[str, Any]:
         ls_item = ls_item.strip()
     try:
         cur = _conn.execute(
-            "INSERT INTO instruments(code, name, currency, isin, ls_item) VALUES (?,?,?,?,?)",
-            (code, name, currency, isin, ls_item or None),
+            "INSERT INTO instruments(code, name, currency, type, base_currency, quote_currency, isin, ls_item) VALUES (?,?,?,?,?,?,?,?)",
+            (code, name, currency, instr_type, base_currency, quote_currency, isin, ls_item or None),
         )
         _conn.commit()
     except Exception as e:
@@ -1150,6 +1351,9 @@ async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[
     fields: List[str] = []
     values: List[Any] = []
     new_code = instrument["code"]
+    instr_type = _normalize_instrument_type(body.type) if body.type is not None else (instrument.get("type") or "asset")
+    base_currency = instrument.get("base_currency")
+    quote_currency = instrument.get("quote_currency")
     if body.code is not None:
         code = _normalize_code(body.code)
         if not code:
@@ -1167,9 +1371,15 @@ async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[
     if body.name is not None:
         fields.append("name=?")
         values.append((body.name or "").strip() or new_code)
+
+    currency_update: Optional[str] = None
     if body.currency is not None:
-        fields.append("currency=?")
-        values.append(_normalize_currency(body.currency))
+        currency_update = _normalize_currency(body.currency)
+
+    if body.base_currency is not None:
+        base_currency = _normalize_currency(body.base_currency, default=None) or None
+    if body.quote_currency is not None:
+        quote_currency = _normalize_currency(body.quote_currency, default=None) or None
     if body.isin is not None:
         if body.isin:
             fields.append("isin=?")
@@ -1181,6 +1391,28 @@ async def update_instrument(instrument_id: int, body: InstrumentUpdate) -> Dict[
         ls_item = (body.ls_item or "").strip()
         fields.append("ls_item=?")
         values.append(ls_item or None)
+
+    if instr_type == "fx":
+        if not base_currency or not quote_currency:
+            raise HTTPException(status_code=400, detail="FX-Instrument braucht Base- und Quote-Waehrung")
+        if currency_update is None and quote_currency:
+            currency_update = quote_currency
+    else:
+        base_currency = None
+        quote_currency = None
+
+    if body.type is not None:
+        fields.append("type=?")
+        values.append(instr_type)
+    if body.base_currency is not None or instr_type != (instrument.get("type") or "asset"):
+        fields.append("base_currency=?")
+        values.append(base_currency)
+    if body.quote_currency is not None or instr_type != (instrument.get("type") or "asset"):
+        fields.append("quote_currency=?")
+        values.append(quote_currency)
+    if currency_update is not None:
+        fields.append("currency=?")
+        values.append(currency_update)
 
     if fields:
         values.append(instrument_id)
@@ -1318,22 +1550,16 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
     Wichtig: Wir holen alle Bid-Quotes gesammelt in *einer* Lightstreamer-Session,
     um die Bewertung kontinuierlich (Polling) effizient zu halten.
     """
-    portfolios, by_portfolio, _ = _load_portfolios_and_positions(_conn)
-    if not portfolios:
-        return []
-
     # Für Dashboard: Snapshot aus dem aktuellen Kurs-Cache (beste Quelle).
-    # Fallback: falls noch kein Kurs gesehen wurde, werden bids als None angezeigt.
+    # Fallback: falls noch kein Kurs gesehen wurde, werden Preise als None angezeigt.
     stream_manager.start()
     bids = stream_manager._bids_as_optional()
-    # asks werden separat für Watchlist im Snapshot per WS genutzt
-    valued_at = now_iso()
-
-    out: List[Dict[str, Any]] = []
-    for pf in portfolios:
-        pid = int(pf["id"])
-        out.append(compute_valuation(pf, by_portfolio.get(pid, []), bids, valued_at=valued_at, timeout_s=0.0))
-    return out
+    prices = stream_manager._prices_as_optional()
+    return compute_all_valuations_from_prices(
+        prices,
+        bids,
+        stream_manager.quote_router.best_price_source,
+    )
 
 
 @app.get("/api/portfolios/{portfolio_id}")
@@ -1494,12 +1720,32 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
     positions = [dict(r) for r in cur2.fetchall()]
     valued_at = now_iso()
     if not positions:
-        return compute_valuation(dict(portfolio), [], {}, valued_at=valued_at, timeout_s=0.0)
+        return compute_valuation(
+            dict(portfolio),
+            [],
+            {},
+            {},
+            {},
+            {},
+            valued_at=valued_at,
+            timeout_s=0.0,
+        )
 
     # Einzelbewertung nutzt den Kurs-Cache (keine eigene LS-Session), damit die Quellen-Prioritaet konsistent bleibt.
     stream_manager.start()
     bids = stream_manager._bids_as_optional()
-    return compute_valuation(dict(portfolio), positions, bids, valued_at=valued_at, timeout_s=0.0)
+    prices = stream_manager._prices_as_optional()
+    fx_rates = build_fx_rates(prices, load_stream_instruments(_conn))
+    return compute_valuation(
+        dict(portfolio),
+        positions,
+        prices,
+        bids,
+        stream_manager.quote_router.best_price_source,
+        fx_rates,
+        valued_at=valued_at,
+        timeout_s=0.0,
+    )
 
 
 @app.websocket("/ws")
