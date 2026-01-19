@@ -219,10 +219,18 @@ class TradegateClient:
         except Exception as exc:
             logger.warning("Tradegate request failed for %s: %s", isin, exc)
             return None
+        if not raw or not raw.strip():
+            logger.debug("Tradegate empty response for %s", isin)
+            return None
+        stripped = raw.lstrip()
+        if stripped.startswith("<"):
+            logger.debug("Tradegate non-json response for %s", isin)
+            return None
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            logger.warning("Tradegate JSON decode failed for %s: %s", isin, exc)
+            snippet = raw.strip().replace("\n", " ")[:120]
+            logger.warning("Tradegate JSON decode failed for %s: %s (payload=%s)", isin, exc, snippet)
             return None
         if not isinstance(data, dict):
             logger.warning("Tradegate payload not a dict for %s", isin)
