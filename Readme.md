@@ -48,6 +48,7 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 - Lightstreamer nutzt das Item-Template aus den **Kursquellen-Einstellungen** (oder ein explizites `LS Item` am Instrument).
 - Tradegate nutzt die ISIN am Instrument (falls gesetzt).
 - Kursquellen werden pro Instrument/FX gepflegt (Quelle + Source-ID + Prioritaet).
+- Sortierungen (Portfolios/Watchlist/Positionen) und Kursquellen-Reihenfolge sind persistent gespeichert.
 
 ### Watchlist (Dashboard)
 
@@ -64,6 +65,7 @@ Alle Quell-spezifischen Einstellungen (Lightstreamer, Tradegate, Bitfinex, Defau
 
 - Reihenfolge = Prioritaet. Pro Titel wird die erste Quelle mit Kurs verwendet.
 - ISINs koennen mehrere Quellen haben; LS Items koennen beliebige Lightstreamer-Item-IDs sein.
+- Reihenfolge der Kursquellen pro Instrument/FX wird per Drag&Drop festgelegt und bleibt erhalten.
 
 ### MQTT → Home Assistant (Auto-Detect)
 
@@ -76,3 +78,4 @@ Die MQTT-Konfiguration liegt in **Einstellungen**. MQTT wird dort aktiviert/deak
 - Währungswerte werden als **`device_class: monetary`** mit **`unit_of_measurement`** (z.B. EUR/USD) publiziert, damit Home Assistant Historie korrekt führt.
 
 Hinweis: ENV-Werte werden beim ersten Start als Defaults in die Datenbank uebernommen.
+Sortierungen und geloeschte Kursquellen werden nicht mehr automatisch wiederhergestellt.
