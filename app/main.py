@@ -565,6 +565,8 @@ def load_stream_instruments(conn) -> List[Dict[str, Any]]:
             SELECT instrument_id FROM positions
             UNION
             SELECT instrument_id FROM watchlist
+            UNION
+            SELECT instrument_id FROM instrument_sources
         )
         UNION
         SELECT
@@ -578,6 +580,9 @@ def load_stream_instruments(conn) -> List[Dict[str, Any]]:
             fx.base_currency AS base_currency,
             fx.quote_currency AS quote_currency
         FROM fx_rates fx
+        WHERE fx.id IN (
+            SELECT fx_rate_id FROM fx_rate_sources
+        )
         ORDER BY code DESC
         """
     )
@@ -1370,6 +1375,16 @@ def _normalize_source_code(value: str) -> str:
     return (value or "").strip().upper()
 
 
+def _get_source_price(source: str, key: str) -> Optional[float]:
+    src = (source or "").strip().lower()
+    if not src or not key:
+        return None
+    price = stream_manager.quote_router.source_prices.get(src, {}).get(key)
+    if price is None:
+        price = stream_manager.quote_router.source_bids.get(src, {}).get(key)
+    return price
+
+
 
 
 def _get_instrument(instrument_id: int) -> Dict[str, Any]:
@@ -1428,6 +1443,11 @@ async def index():
 @app.get("/manage")
 async def manage():
     return FileResponse("app/static/manage.html")
+
+
+@app.get("/instruments")
+async def instruments_page():
+    return FileResponse("app/static/instruments.html")
 
 
 @app.get("/api/instruments")
@@ -1556,6 +1576,28 @@ async def list_instrument_sources(instrument_id: int) -> List[Dict[str, Any]]:
         (instrument_id,),
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+@app.get("/api/instruments/{instrument_id}/sources/quotes")
+async def list_instrument_source_quotes(instrument_id: int) -> List[Dict[str, Any]]:
+    instrument = _get_instrument(instrument_id)
+    cur = _conn.execute(
+        "SELECT id, source, source_code, priority FROM instrument_sources WHERE instrument_id=? ORDER BY priority ASC, id ASC",
+        (instrument_id,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    key = instrument["code"]
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        src = row.get("source")
+        out.append(
+            {
+                **row,
+                "price": _get_source_price(src, key),
+                "active": (stream_manager.quote_router.best_price_source.get(key) == src),
+            }
+        )
+    return out
 
 
 @app.post("/api/instruments/{instrument_id}/sources", status_code=201)
@@ -1738,6 +1780,28 @@ async def list_fx_rate_sources(fx_id: int) -> List[Dict[str, Any]]:
         (fx_id,),
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+@app.get("/api/fx-rates/{fx_id}/sources/quotes")
+async def list_fx_rate_source_quotes(fx_id: int) -> List[Dict[str, Any]]:
+    fx = _get_fx_rate(fx_id)
+    cur = _conn.execute(
+        "SELECT id, source, source_code, priority FROM fx_rate_sources WHERE fx_rate_id=? ORDER BY priority ASC, id ASC",
+        (fx_id,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    key = fx["code"]
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        src = row.get("source")
+        out.append(
+            {
+                **row,
+                "price": _get_source_price(src, key),
+                "active": (stream_manager.quote_router.best_price_source.get(key) == src),
+            }
+        )
+    return out
 
 
 @app.post("/api/fx-rates/{fx_id}/sources", status_code=201)

@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Instrumente</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #1b1f24;
+      --muted: #6b7280;
+      --line: #e6e9f0;
+      --accent: #2d6cdf;
+      --accent-soft: #eef3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .container { max-width: 1240px; margin: 0 auto; padding: 24px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 28px; }
+    h2 { margin: 0 0 6px 0; font-size: 20px; }
+    .sub { color: var(--muted); font-size: 14px; }
+    .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .button {
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .button.ghost {
+      background: transparent;
+      color: var(--accent);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .grid {
+      display: grid;
+      gap: 16px;
+      margin-top: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    }
+    .span-2 { grid-column: span 2; }
+    .status {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+    .status.info { background: #eef3ff; color: #23448b; }
+    .status.success { background: #e7f7ea; color: #1f6f3a; }
+    .status.warn { background: #fff2dc; color: #8a5a17; }
+    .status.error { background: #ffe7ea; color: #8f1d2f; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    input, select {
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font-size: 14px;
+    }
+    .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    @media (max-width: 900px) {
+      header { align-items: flex-start; }
+      .actions { width: 100%; justify-content: flex-start; }
+      .span-2 { grid-column: span 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <div class="sub">Stammdaten & Kursquellen</div>
+        <h1>Instrumente</h1>
+        <div class="sub">Kursquellen, Prioritaeten und Live-Checks</div>
+      </div>
+      <div class="actions">
+        <a class="button ghost" href="/">Dashboard</a>
+        <a class="button ghost" href="/manage">Portfolio</a>
+      </div>
+    </header>
+
+    <div id="status" class="status info">Lade...</div>
+
+    <div class="grid">
+      <section class="card span-2">
+        <h2>Instrumente</h2>
+        <div class="sub">Basisdaten fuer Positionen und Watchlist</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Name</th>
+                <th>Waehrung</th>
+                <th>ISIN</th>
+                <th>LS Item</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="instrumentsTbody"></tbody>
+          </table>
+        </div>
+        <div class="inline-form" style="margin-top: 12px;">
+          <input id="newInstrumentCode" placeholder="Instrument-ID" />
+          <input id="newInstrumentName" placeholder="Name" />
+          <select id="newInstrumentCurrency">
+            <option value="EUR">EUR</option>
+            <option value="USD">USD</option>
+            <option value="CHF">CHF</option>
+            <option value="GBP">GBP</option>
+          </select>
+          <input id="newInstrumentIsin" placeholder="ISIN (optional)" />
+          <input id="newInstrumentLsItem" placeholder="LS Item (optional)" />
+          <button id="addInstrumentBtn" class="button">Anlegen</button>
+        </div>
+      </section>
+
+      <section class="card span-2">
+        <div class="inline-form" style="justify-content: space-between; align-items: flex-end;">
+          <div>
+            <h2>Kursquellen (Instrumente)</h2>
+            <div class="sub">Quelle + Source-ID + Prioritaet, inkl. Live-Preis</div>
+          </div>
+          <button id="refreshInstrumentSourcesBtn" class="button ghost">Aktualisieren</button>
+        </div>
+        <div class="inline-form" style="margin-top: 12px;">
+          <select id="sourceInstrumentSelect"></select>
+          <select id="newInstrumentSourceType">
+            <option value="lightstreamer">Lightstreamer</option>
+            <option value="tradegate">Tradegate</option>
+            <option value="bitfinex">Bitfinex</option>
+          </select>
+          <input id="newInstrumentSourceCode" placeholder="Source-ID (z.B. ISIN, LS Item, BTCUSD)" />
+          <input id="newInstrumentSourcePriority" type="number" min="0" max="1000" placeholder="Prioritaet" />
+          <button id="addInstrumentSourceBtn" class="button">Quelle hinzufuegen</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Quelle</th>
+                <th>Source-ID</th>
+                <th class="num">Prioritaet</th>
+                <th class="num">Preis</th>
+                <th>Aktiv</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="instrumentSourcesTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-2">
+        <div class="inline-form" style="justify-content: space-between; align-items: flex-end;">
+          <div>
+            <h2>FX-Kurse</h2>
+            <div class="sub">Nur fuer Umrechnung (Base/Quote)</div>
+          </div>
+          <span class="pill">FX</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Name</th>
+                <th>Base</th>
+                <th>Quote</th>
+                <th>ISIN</th>
+                <th>LS Item</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="fxTbody"></tbody>
+          </table>
+        </div>
+        <div class="inline-form" style="margin-top: 12px;">
+          <input id="newFxCode" placeholder="FX-Code" />
+          <input id="newFxName" placeholder="Name" />
+          <input id="newFxBase" placeholder="Base (z.B. USD)" />
+          <input id="newFxQuote" placeholder="Quote (z.B. EUR)" />
+          <input id="newFxIsin" placeholder="ISIN (optional)" />
+          <input id="newFxLsItem" placeholder="LS Item (optional)" />
+          <button id="addFxBtn" class="button">Anlegen</button>
+        </div>
+      </section>
+
+      <section class="card span-2">
+        <div class="inline-form" style="justify-content: space-between; align-items: flex-end;">
+          <div>
+            <h2>Kursquellen (FX)</h2>
+            <div class="sub">Quelle + Source-ID + Prioritaet, inkl. Live-Preis</div>
+          </div>
+          <button id="refreshFxSourcesBtn" class="button ghost">Aktualisieren</button>
+        </div>
+        <div class="inline-form" style="margin-top: 12px;">
+          <select id="sourceFxSelect"></select>
+          <select id="newFxSourceType">
+            <option value="lightstreamer">Lightstreamer</option>
+            <option value="tradegate">Tradegate</option>
+            <option value="bitfinex">Bitfinex</option>
+          </select>
+          <input id="newFxSourceCode" placeholder="Source-ID (z.B. ISIN, LS Item, BTCUSD)" />
+          <input id="newFxSourcePriority" type="number" min="0" max="1000" placeholder="Prioritaet" />
+          <button id="addFxSourceBtn" class="button">Quelle hinzufuegen</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Quelle</th>
+                <th>Source-ID</th>
+                <th class="num">Prioritaet</th>
+                <th class="num">Preis</th>
+                <th>Aktiv</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="fxSourcesTbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+
+    const instrumentsTbody = document.getElementById("instrumentsTbody");
+    const newInstrumentCode = document.getElementById("newInstrumentCode");
+    const newInstrumentName = document.getElementById("newInstrumentName");
+    const newInstrumentCurrency = document.getElementById("newInstrumentCurrency");
+    const newInstrumentIsin = document.getElementById("newInstrumentIsin");
+    const newInstrumentLsItem = document.getElementById("newInstrumentLsItem");
+    const addInstrumentBtn = document.getElementById("addInstrumentBtn");
+
+    const fxTbody = document.getElementById("fxTbody");
+    const newFxCode = document.getElementById("newFxCode");
+    const newFxName = document.getElementById("newFxName");
+    const newFxBase = document.getElementById("newFxBase");
+    const newFxQuote = document.getElementById("newFxQuote");
+    const newFxIsin = document.getElementById("newFxIsin");
+    const newFxLsItem = document.getElementById("newFxLsItem");
+    const addFxBtn = document.getElementById("addFxBtn");
+
+    const sourceInstrumentSelect = document.getElementById("sourceInstrumentSelect");
+    const newInstrumentSourceType = document.getElementById("newInstrumentSourceType");
+    const newInstrumentSourceCode = document.getElementById("newInstrumentSourceCode");
+    const newInstrumentSourcePriority = document.getElementById("newInstrumentSourcePriority");
+    const addInstrumentSourceBtn = document.getElementById("addInstrumentSourceBtn");
+    const instrumentSourcesTbody = document.getElementById("instrumentSourcesTbody");
+    const refreshInstrumentSourcesBtn = document.getElementById("refreshInstrumentSourcesBtn");
+
+    const sourceFxSelect = document.getElementById("sourceFxSelect");
+    const newFxSourceType = document.getElementById("newFxSourceType");
+    const newFxSourceCode = document.getElementById("newFxSourceCode");
+    const newFxSourcePriority = document.getElementById("newFxSourcePriority");
+    const addFxSourceBtn = document.getElementById("addFxSourceBtn");
+    const fxSourcesTbody = document.getElementById("fxSourcesTbody");
+    const refreshFxSourcesBtn = document.getElementById("refreshFxSourcesBtn");
+
+    const state = {
+      instruments: [],
+      fxRates: [],
+      instrumentSources: [],
+      fxSources: [],
+    };
+
+    function setStatus(level, message) {
+      statusEl.className = "status " + level;
+      statusEl.textContent = message;
+    }
+
+    function fmtNum(n) {
+      if (n === null || n === undefined) return "—";
+      if (!isFinite(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+    }
+
+    async function api(path, options={}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) return await res.json();
+      return await res.text();
+    }
+
+    function renderInstrumentSelect(select, instruments, selectedId) {
+      select.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Instrument waehlen";
+      select.appendChild(placeholder);
+      for (const inst of instruments) {
+        const opt = document.createElement("option");
+        opt.value = String(inst.id);
+        const name = inst.name || inst.code || ("#" + inst.id);
+        opt.textContent = `${name} (${inst.code || "-"})`;
+        select.appendChild(opt);
+      }
+      if (selectedId) select.value = String(selectedId);
+    }
+
+    function renderFxSelect(select, fxRates, selectedId) {
+      select.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "FX waehlen";
+      select.appendChild(placeholder);
+      for (const fx of fxRates) {
+        const opt = document.createElement("option");
+        opt.value = String(fx.id);
+        const name = fx.name || fx.code || ("#" + fx.id);
+        opt.textContent = `${name} (${fx.base_currency}/${fx.quote_currency})`;
+        select.appendChild(opt);
+      }
+      if (selectedId) select.value = String(selectedId);
+    }
+
+    function renderInstruments() {
+      instrumentsTbody.innerHTML = "";
+      for (const inst of state.instruments) {
+        const tr = document.createElement("tr");
+        tr.dataset.id = String(inst.id);
+        const tdCode = document.createElement("td");
+        const tdName = document.createElement("td");
+        const tdCurr = document.createElement("td");
+        const tdIsin = document.createElement("td");
+        const tdLs = document.createElement("td");
+        const tdActions = document.createElement("td");
+
+        const codeInput = document.createElement("input");
+        codeInput.value = inst.code || "";
+        const nameInput = document.createElement("input");
+        nameInput.value = inst.name || "";
+        const currSelect = document.createElement("select");
+        ["EUR", "USD", "CHF", "GBP"].forEach(c => {
+          const opt = document.createElement("option");
+          opt.value = c;
+          opt.textContent = c;
+          currSelect.appendChild(opt);
+        });
+        currSelect.value = (inst.currency || "EUR").toUpperCase();
+        const isinInput = document.createElement("input");
+        isinInput.value = inst.isin || "";
+        const lsInput = document.createElement("input");
+        lsInput.value = inst.ls_item || "";
+
+        const saveRow = async () => {
+          const payload = {
+            code: codeInput.value.trim(),
+            name: nameInput.value.trim(),
+            currency: currSelect.value,
+            isin: isinInput.value.trim() || null,
+            ls_item: lsInput.value.trim() || null,
+          };
+          setStatus("info", "Speichere Instrument...");
+          await api(`/api/instruments/${inst.id}`, { method: "PUT", body: JSON.stringify(payload) });
+          await loadInstruments();
+          setStatus("success", "Instrument gespeichert.");
+        };
+
+        [codeInput, nameInput, currSelect, isinInput, lsInput].forEach(el => {
+          el.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+        });
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Loeschen";
+        delBtn.onclick = async () => {
+          if (!confirm(`Instrument loeschen?\\n\\n${inst.name} (${inst.code})`)) return;
+          setStatus("info", "Loesche Instrument...");
+          await api(`/api/instruments/${inst.id}`, { method: "DELETE" });
+          await loadInstruments();
+          setStatus("success", "Instrument geloescht.");
+        };
+
+        tdCode.appendChild(codeInput);
+        tdName.appendChild(nameInput);
+        tdCurr.appendChild(currSelect);
+        tdIsin.appendChild(isinInput);
+        tdLs.appendChild(lsInput);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdCode);
+        tr.appendChild(tdName);
+        tr.appendChild(tdCurr);
+        tr.appendChild(tdIsin);
+        tr.appendChild(tdLs);
+        tr.appendChild(tdActions);
+        instrumentsTbody.appendChild(tr);
+      }
+    }
+
+    function renderFxRates() {
+      fxTbody.innerHTML = "";
+      for (const fx of state.fxRates) {
+        const tr = document.createElement("tr");
+        tr.dataset.id = String(fx.id);
+        const tdCode = document.createElement("td");
+        const tdName = document.createElement("td");
+        const tdBase = document.createElement("td");
+        const tdQuote = document.createElement("td");
+        const tdIsin = document.createElement("td");
+        const tdLs = document.createElement("td");
+        const tdActions = document.createElement("td");
+
+        const codeInput = document.createElement("input");
+        codeInput.value = fx.code || "";
+        const nameInput = document.createElement("input");
+        nameInput.value = fx.name || "";
+        const baseInput = document.createElement("input");
+        baseInput.value = fx.base_currency || "";
+        const quoteInput = document.createElement("input");
+        quoteInput.value = fx.quote_currency || "";
+        const isinInput = document.createElement("input");
+        isinInput.value = fx.isin || "";
+        const lsInput = document.createElement("input");
+        lsInput.value = fx.ls_item || "";
+
+        const saveRow = async () => {
+          const payload = {
+            code: codeInput.value.trim(),
+            name: nameInput.value.trim(),
+            base_currency: baseInput.value.trim(),
+            quote_currency: quoteInput.value.trim(),
+            isin: isinInput.value.trim() || null,
+            ls_item: lsInput.value.trim() || null,
+          };
+          setStatus("info", "Speichere FX-Instrument...");
+          await api(`/api/fx-rates/${fx.id}`, { method: "PUT", body: JSON.stringify(payload) });
+          await loadFxRates();
+          setStatus("success", "FX-Instrument gespeichert.");
+        };
+
+        [codeInput, nameInput, baseInput, quoteInput, isinInput, lsInput].forEach(el => {
+          el.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+        });
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Loeschen";
+        delBtn.onclick = async () => {
+          if (!confirm(`FX-Instrument loeschen?\\n\\n${fx.name} (${fx.code})`)) return;
+          setStatus("info", "Loesche FX-Instrument...");
+          await api(`/api/fx-rates/${fx.id}`, { method: "DELETE" });
+          await loadFxRates();
+          setStatus("success", "FX-Instrument geloescht.");
+        };
+
+        tdCode.appendChild(codeInput);
+        tdName.appendChild(nameInput);
+        tdBase.appendChild(baseInput);
+        tdQuote.appendChild(quoteInput);
+        tdIsin.appendChild(isinInput);
+        tdLs.appendChild(lsInput);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdCode);
+        tr.appendChild(tdName);
+        tr.appendChild(tdBase);
+        tr.appendChild(tdQuote);
+        tr.appendChild(tdIsin);
+        tr.appendChild(tdLs);
+        tr.appendChild(tdActions);
+        fxTbody.appendChild(tr);
+      }
+    }
+
+    function renderInstrumentSources() {
+      instrumentSourcesTbody.innerHTML = "";
+      for (const src of state.instrumentSources) {
+        const tr = document.createElement("tr");
+        const tdSource = document.createElement("td");
+        const tdCode = document.createElement("td");
+        const tdPriority = document.createElement("td");
+        const tdPrice = document.createElement("td");
+        const tdActive = document.createElement("td");
+        const tdActions = document.createElement("td");
+
+        tdSource.textContent = (src.source || "").toLowerCase();
+
+        const codeInput = document.createElement("input");
+        codeInput.value = src.source_code || "";
+        const priorityInput = document.createElement("input");
+        priorityInput.type = "number";
+        priorityInput.min = "0";
+        priorityInput.max = "1000";
+        priorityInput.value = String(src.priority ?? 100);
+        priorityInput.classList.add("num");
+
+        tdPrice.classList.add("num");
+        tdPrice.textContent = (src.price === null || src.price === undefined) ? "—" : fmtNum(src.price);
+        tdActive.textContent = src.active ? "ja" : "—";
+
+        const saveRow = async () => {
+          setStatus("info", "Speichere Kursquelle...");
+          await api(`/api/instruments/${sourceInstrumentSelect.value}/sources/${src.id}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              source_code: codeInput.value.trim(),
+              priority: Number(priorityInput.value),
+            }),
+          });
+          await loadInstrumentSources();
+          setStatus("success", "Kursquelle gespeichert.");
+        };
+        codeInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+        priorityInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Loeschen";
+        delBtn.onclick = async () => {
+          setStatus("info", "Loesche Kursquelle...");
+          await api(`/api/instruments/${sourceInstrumentSelect.value}/sources/${src.id}`, { method: "DELETE" });
+          await loadInstrumentSources();
+          setStatus("success", "Kursquelle geloescht.");
+        };
+
+        tdCode.appendChild(codeInput);
+        tdPriority.appendChild(priorityInput);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdSource);
+        tr.appendChild(tdCode);
+        tr.appendChild(tdPriority);
+        tr.appendChild(tdPrice);
+        tr.appendChild(tdActive);
+        tr.appendChild(tdActions);
+        instrumentSourcesTbody.appendChild(tr);
+      }
+    }
+
+    function renderFxSources() {
+      fxSourcesTbody.innerHTML = "";
+      for (const src of state.fxSources) {
+        const tr = document.createElement("tr");
+        const tdSource = document.createElement("td");
+        const tdCode = document.createElement("td");
+        const tdPriority = document.createElement("td");
+        const tdPrice = document.createElement("td");
+        const tdActive = document.createElement("td");
+        const tdActions = document.createElement("td");
+
+        tdSource.textContent = (src.source || "").toLowerCase();
+
+        const codeInput = document.createElement("input");
+        codeInput.value = src.source_code || "";
+        const priorityInput = document.createElement("input");
+        priorityInput.type = "number";
+        priorityInput.min = "0";
+        priorityInput.max = "1000";
+        priorityInput.value = String(src.priority ?? 100);
+        priorityInput.classList.add("num");
+
+        tdPrice.classList.add("num");
+        tdPrice.textContent = (src.price === null || src.price === undefined) ? "—" : fmtNum(src.price);
+        tdActive.textContent = src.active ? "ja" : "—";
+
+        const saveRow = async () => {
+          setStatus("info", "Speichere FX-Quelle...");
+          await api(`/api/fx-rates/${sourceFxSelect.value}/sources/${src.id}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              source_code: codeInput.value.trim(),
+              priority: Number(priorityInput.value),
+            }),
+          });
+          await loadFxSources();
+          setStatus("success", "FX-Quelle gespeichert.");
+        };
+        codeInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+        priorityInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Loeschen";
+        delBtn.onclick = async () => {
+          setStatus("info", "Loesche FX-Quelle...");
+          await api(`/api/fx-rates/${sourceFxSelect.value}/sources/${src.id}`, { method: "DELETE" });
+          await loadFxSources();
+          setStatus("success", "FX-Quelle geloescht.");
+        };
+
+        tdCode.appendChild(codeInput);
+        tdPriority.appendChild(priorityInput);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdSource);
+        tr.appendChild(tdCode);
+        tr.appendChild(tdPriority);
+        tr.appendChild(tdPrice);
+        tr.appendChild(tdActive);
+        tr.appendChild(tdActions);
+        fxSourcesTbody.appendChild(tr);
+      }
+    }
+
+    async function loadInstruments() {
+      state.instruments = await api("/api/instruments");
+      renderInstruments();
+      renderInstrumentSelect(sourceInstrumentSelect, state.instruments, sourceInstrumentSelect.value);
+      await loadInstrumentSources();
+    }
+
+    async function loadFxRates() {
+      state.fxRates = await api("/api/fx-rates");
+      renderFxRates();
+      renderFxSelect(sourceFxSelect, state.fxRates, sourceFxSelect.value);
+      await loadFxSources();
+    }
+
+    async function loadInstrumentSources() {
+      const instrumentId = Number(sourceInstrumentSelect.value);
+      if (!instrumentId) {
+        state.instrumentSources = [];
+        renderInstrumentSources();
+        return;
+      }
+      state.instrumentSources = await api(`/api/instruments/${instrumentId}/sources/quotes`);
+      renderInstrumentSources();
+    }
+
+    async function loadFxSources() {
+      const fxId = Number(sourceFxSelect.value);
+      if (!fxId) {
+        state.fxSources = [];
+        renderFxSources();
+        return;
+      }
+      state.fxSources = await api(`/api/fx-rates/${fxId}/sources/quotes`);
+      renderFxSources();
+    }
+
+    async function createInstrument() {
+      const code = newInstrumentCode.value.trim();
+      const name = newInstrumentName.value.trim() || code;
+      if (!code || !name) return;
+      const payload = {
+        code,
+        name,
+        currency: newInstrumentCurrency.value,
+        isin: newInstrumentIsin.value.trim() || null,
+        ls_item: newInstrumentLsItem.value.trim() || null,
+      };
+      setStatus("info", "Lege Instrument an...");
+      await api("/api/instruments", { method: "POST", body: JSON.stringify(payload) });
+      newInstrumentCode.value = "";
+      newInstrumentName.value = "";
+      newInstrumentIsin.value = "";
+      newInstrumentLsItem.value = "";
+      await loadInstruments();
+      setStatus("success", "Instrument angelegt.");
+    }
+
+    async function createFxRate() {
+      const code = newFxCode.value.trim();
+      const name = newFxName.value.trim() || code;
+      const base = newFxBase.value.trim().toUpperCase();
+      const quote = newFxQuote.value.trim().toUpperCase();
+      if (!code || !name || !base || !quote) {
+        setStatus("warn", "Bitte Code, Name, Base und Quote angeben.");
+        return;
+      }
+      const payload = {
+        code,
+        name,
+        base_currency: base,
+        quote_currency: quote,
+        isin: newFxIsin.value.trim() || null,
+        ls_item: newFxLsItem.value.trim() || null,
+      };
+      setStatus("info", "Lege FX-Instrument an...");
+      await api("/api/fx-rates", { method: "POST", body: JSON.stringify(payload) });
+      newFxCode.value = "";
+      newFxName.value = "";
+      newFxBase.value = "";
+      newFxQuote.value = "";
+      newFxIsin.value = "";
+      newFxLsItem.value = "";
+      await loadFxRates();
+      setStatus("success", "FX-Instrument angelegt.");
+    }
+
+    async function addInstrumentSource() {
+      const instrumentId = Number(sourceInstrumentSelect.value);
+      if (!instrumentId) {
+        setStatus("warn", "Bitte Instrument waehlen.");
+        return;
+      }
+      const source = newInstrumentSourceType.value;
+      const sourceCode = newInstrumentSourceCode.value.trim();
+      const priority = Number(newInstrumentSourcePriority.value || 100);
+      if (!sourceCode) {
+        setStatus("warn", "Bitte eine Source-ID angeben.");
+        return;
+      }
+      setStatus("info", "Fuege Kursquelle hinzu...");
+      await api(`/api/instruments/${instrumentId}/sources`, {
+        method: "POST",
+        body: JSON.stringify({ source, source_code: sourceCode, priority }),
+      });
+      newInstrumentSourceCode.value = "";
+      newInstrumentSourcePriority.value = "";
+      await loadInstrumentSources();
+      setStatus("success", "Kursquelle hinzugefuegt.");
+    }
+
+    async function addFxSource() {
+      const fxId = Number(sourceFxSelect.value);
+      if (!fxId) {
+        setStatus("warn", "Bitte FX waehlen.");
+        return;
+      }
+      const source = newFxSourceType.value;
+      const sourceCode = newFxSourceCode.value.trim();
+      const priority = Number(newFxSourcePriority.value || 100);
+      if (!sourceCode) {
+        setStatus("warn", "Bitte eine Source-ID angeben.");
+        return;
+      }
+      setStatus("info", "Fuege FX-Quelle hinzu...");
+      await api(`/api/fx-rates/${fxId}/sources`, {
+        method: "POST",
+        body: JSON.stringify({ source, source_code: sourceCode, priority }),
+      });
+      newFxSourceCode.value = "";
+      newFxSourcePriority.value = "";
+      await loadFxSources();
+      setStatus("success", "FX-Quelle hinzugefuegt.");
+    }
+
+    addInstrumentBtn.onclick = () => createInstrument().catch(e => setStatus("error", String(e.message || e)));
+    addFxBtn.onclick = () => createFxRate().catch(e => setStatus("error", String(e.message || e)));
+    addInstrumentSourceBtn.onclick = () => addInstrumentSource().catch(e => setStatus("error", String(e.message || e)));
+    addFxSourceBtn.onclick = () => addFxSource().catch(e => setStatus("error", String(e.message || e)));
+    refreshInstrumentSourcesBtn.onclick = () => loadInstrumentSources().catch(e => setStatus("error", String(e.message || e)));
+    refreshFxSourcesBtn.onclick = () => loadFxSources().catch(e => setStatus("error", String(e.message || e)));
+    sourceInstrumentSelect.onchange = () => loadInstrumentSources().catch(e => setStatus("error", String(e.message || e)));
+    sourceFxSelect.onchange = () => loadFxSources().catch(e => setStatus("error", String(e.message || e)));
+
+    Promise.all([loadInstruments(), loadFxRates()])
+      .then(() => setStatus("success", "Bereit."))
+      .catch(e => setStatus("error", String(e.message || e)));
+  </script>
+</body>
+</html>

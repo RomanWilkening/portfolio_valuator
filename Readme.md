@@ -31,6 +31,7 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 
 - Dashboard (Auto-Bewertung): `http://localhost:8000/`
 - Portfolio-Pflege (ohne Auto-Refresh): `http://localhost:8000/manage`
+- Instrumente & Kursquellen: `http://localhost:8000/instruments`
 
 ### Datenmodell (Instrumente)
 
