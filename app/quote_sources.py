@@ -10,8 +10,9 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 SOURCE_LIGHTSTREAMER = "lightstreamer"
 SOURCE_TRADEGATE = "tradegate"
+SOURCE_BITFINEX = "bitfinex"
 
-DEFAULT_SOURCE_PRIORITY = [SOURCE_LIGHTSTREAMER, SOURCE_TRADEGATE]
+DEFAULT_SOURCE_PRIORITY = [SOURCE_LIGHTSTREAMER, SOURCE_TRADEGATE, SOURCE_BITFINEX]
 
 logger = logging.getLogger("portfolio-valuator.quote-sources")
 
@@ -53,6 +54,7 @@ class QuoteRouter:
         self.source_price_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.known_sources}
         self.source_watch_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.known_sources}
         self.source_watch_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.known_sources}
+        self.source_last_update: Dict[str, Dict[str, str]] = {s: {} for s in self.known_sources}
 
         self.best_bids: Dict[str, float] = {}
         self.best_bid_source: Dict[str, str] = {}
@@ -173,6 +175,8 @@ class QuoteRouter:
             if watch_field is not None:
                 self.source_watch_fields.setdefault(src, {})[key] = str(watch_field)
             changed = self._refresh_best_watch(key) or changed
+        if bid is not None or price is not None or watch_price is not None:
+            self.source_last_update.setdefault(src, {})[key] = now_iso()
         return changed
 
     def trim_keys(self, keep: Iterable[str]) -> bool:
@@ -227,6 +231,7 @@ class QuoteRouter:
             self.source_price_fields.setdefault(src, {})
             self.source_watch_prices.setdefault(src, {})
             self.source_watch_fields.setdefault(src, {})
+            self.source_last_update.setdefault(src, {})
 
 
 @dataclass(frozen=True)
@@ -377,3 +382,150 @@ class TradegatePoller:
             except Exception:
                 logger.exception("TradegatePoller error")
                 await asyncio.sleep(2.0)
+
+
+@dataclass(frozen=True)
+class BitfinexSettings:
+    wss_url: str
+    reconnect_min_s: float
+    reconnect_max_s: float
+
+
+def load_bitfinex_settings() -> BitfinexSettings:
+    return BitfinexSettings(
+        wss_url=os.getenv("BITFINEX_WSS_URL", "wss://api-pub.bitfinex.com/ws/2"),
+        reconnect_min_s=float(os.getenv("BITFINEX_RECONNECT_MIN_S", "1.0")),
+        reconnect_max_s=float(os.getenv("BITFINEX_RECONNECT_MAX_S", "30.0")),
+    )
+
+
+def normalize_bitfinex_symbol(symbol: str) -> Optional[str]:
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return None
+    if sym.startswith("T") or sym.startswith("F"):
+        return sym
+    return "T" + sym
+
+
+def _bitfinex_pick_price(bid: Optional[float], ask: Optional[float], last: Optional[float]) -> tuple[Optional[float], Optional[str]]:
+    def _valid(val: Optional[float]) -> bool:
+        return val is not None and val != 0.0
+
+    if _valid(bid):
+        return bid, "bid"
+    if bid is not None and ask is not None and bid != 0.0 and ask != 0.0:
+        return (bid + ask) / 2.0, "mid"
+    if _valid(last):
+        return last, "last"
+    if _valid(ask):
+        return ask, "ask"
+    return None, None
+
+
+class BitfinexStream:
+    def __init__(
+        self,
+        *,
+        settings: BitfinexSettings,
+        router: QuoteRouter,
+        on_best_update: Callable[[str, Optional[str]], Awaitable[None]],
+    ) -> None:
+        self.settings = settings
+        self.router = router
+        self.on_best_update = on_best_update
+        self._enabled = False
+        self._task: Optional[asyncio.Task] = None
+        self._mapping: Dict[str, set[str]] = {}
+        self._version = 0
+
+    def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run())
+
+    def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+
+    def set_mapping(self, mapping: Dict[str, set[str]]) -> None:
+        self._mapping = {k: set(v) for k, v in (mapping or {}).items() if k and v}
+        self._version += 1
+
+    async def _run(self) -> None:
+        import websockets
+
+        backoff_s = max(0.1, self.settings.reconnect_min_s)
+        while True:
+            try:
+                if not self._enabled or not self._mapping:
+                    await asyncio.sleep(0.5)
+                    continue
+
+                version = self._version
+                symbols = list(self._mapping.keys())
+
+                async with websockets.connect(self.settings.wss_url, ping_interval=20, ping_timeout=20) as ws:
+                    chan_to_symbol: Dict[int, str] = {}
+                    for symbol in symbols:
+                        await ws.send(json.dumps({"event": "subscribe", "channel": "ticker", "symbol": symbol}))
+
+                    while self._enabled and version == self._version:
+                        raw = await ws.recv()
+                        try:
+                            msg = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        if isinstance(msg, dict):
+                            if msg.get("event") == "subscribed" and msg.get("channel") == "ticker":
+                                chan_id = msg.get("chanId")
+                                sym = msg.get("symbol")
+                                if isinstance(chan_id, int) and sym:
+                                    chan_to_symbol[chan_id] = sym
+                            continue
+
+                        if not isinstance(msg, list) or len(msg) < 2:
+                            continue
+                        chan_id = msg[0]
+                        payload = msg[1]
+                        if payload == "hb":
+                            continue
+                        if not isinstance(chan_id, int) or chan_id not in chan_to_symbol:
+                            continue
+                        symbol = chan_to_symbol[chan_id]
+                        data = payload if isinstance(payload, list) else None
+                        if not data or len(data) < 7:
+                            continue
+
+                        bid = _parse_tradegate_number(data[0])
+                        ask = _parse_tradegate_number(data[2])
+                        last = _parse_tradegate_number(data[6])
+                        price, field = _bitfinex_pick_price(bid, ask, last)
+                        bid_val = bid if (bid is not None and bid != 0.0) else None
+
+                        keys = self._mapping.get(symbol, set())
+                        for key in keys:
+                            changed = self.router.update_from_source(
+                                source=SOURCE_BITFINEX,
+                                key=key,
+                                bid=bid_val,
+                                price=price,
+                                price_field=field,
+                                watch_price=price,
+                                watch_field=None,
+                            )
+                            if changed:
+                                await self.on_best_update(key, now_iso())
+
+                backoff_s = max(0.1, self.settings.reconnect_min_s)
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("BitfinexStream error")
+                await asyncio.sleep(backoff_s)
+                backoff_s = min(self.settings.reconnect_max_s, max(self.settings.reconnect_min_s, backoff_s * 2.0))

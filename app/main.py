@@ -17,12 +17,16 @@ from websockets.exceptions import ConnectionClosed
 from app.db import connect_db, init_db
 from app.mqtt_ha import HomeAssistantMqttPublisher, load_mqtt_settings
 from app.quote_sources import (
+    SOURCE_BITFINEX,
     SOURCE_LIGHTSTREAMER,
     SOURCE_TRADEGATE,
+    BitfinexStream,
     QuoteRouter,
     TradegatePoller,
     is_isin,
+    load_bitfinex_settings,
     load_tradegate_settings,
+    normalize_bitfinex_symbol,
     parse_source_priority,
 )
 from app.settings import get_bool, set_bool
@@ -66,12 +70,13 @@ LS_STALE_RESTART_S = float(os.getenv("LS_STALE_RESTART_S", "90.0"))
 
 # Kursquellen-Prioritaet (links = hoechste Prioritaet)
 QUOTE_SOURCE_PRIORITY = parse_source_priority(os.getenv("QUOTE_SOURCE_PRIORITY"))
-_KNOWN_SOURCES = {SOURCE_LIGHTSTREAMER, SOURCE_TRADEGATE}
+_KNOWN_SOURCES = {SOURCE_LIGHTSTREAMER, SOURCE_TRADEGATE, SOURCE_BITFINEX}
 _UNKNOWN_SOURCES = [s for s in QUOTE_SOURCE_PRIORITY if s not in _KNOWN_SOURCES]
 if _UNKNOWN_SOURCES:
     logger.warning("Unbekannte Kursquelle in QUOTE_SOURCE_PRIORITY: %s", ", ".join(_UNKNOWN_SOURCES))
 
 TRADEGATE_SETTINGS = load_tradegate_settings()
+BITFINEX_SETTINGS = load_bitfinex_settings()
 
 # Für Streaming + Bewertung nutzen wir das „volle“ Schema (wie aus dem Browser beobachtet),
 # damit auch andere Item-Typen (z.B. Indizes) sauber funktionieren.
@@ -669,6 +674,11 @@ class StreamManager:
         self.quote_router = QuoteRouter(QUOTE_SOURCE_PRIORITY)
         self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.default_priority
         self.tradegate_poller: Optional[TradegatePoller] = None
+        self.bitfinex_stream: Optional[BitfinexStream] = BitfinexStream(
+            settings=BITFINEX_SETTINGS,
+            router=self.quote_router,
+            on_best_update=self._on_source_update,
+        )
         self.instrument_by_code: Dict[str, Dict[str, Any]] = {}
         if SOURCE_TRADEGATE in self.quote_router.default_priority:
             self.tradegate_poller = TradegatePoller(
@@ -681,10 +691,14 @@ class StreamManager:
         if self._task and not self._task.done():
             if self.tradegate_poller:
                 self.tradegate_poller.start()
+            if self.bitfinex_stream:
+                self.bitfinex_stream.start()
             return
         self._task = asyncio.create_task(self._run())
         if self.tradegate_poller:
             self.tradegate_poller.start()
+        if self.bitfinex_stream:
+            self.bitfinex_stream.start()
 
     def mark_dirty(self) -> None:
         self._dirty.set()
@@ -800,6 +814,10 @@ class StreamManager:
                     self.tradegate_poller.set_enabled(need_stream)
                     if not need_stream:
                         self.tradegate_poller.set_mapping({})
+                if self.bitfinex_stream:
+                    self.bitfinex_stream.set_enabled(need_stream)
+                    if not need_stream:
+                        self.bitfinex_stream.set_mapping({})
                 if not need_stream:
                     last_items = []
                     await asyncio.sleep(0.5)
@@ -821,6 +839,7 @@ class StreamManager:
                 targets: List[tuple[str, str]] = []
                 seen_keys: set[str] = {str(i.get("code")) for i in instruments if i.get("code")}
                 tradegate_map: Dict[str, str] = {}
+                bitfinex_map: Dict[str, set[str]] = {}
 
                 ls_seen: set[str] = set()
                 for src in all_sources:
@@ -839,6 +858,10 @@ class StreamManager:
                             tradegate_map[key] = source_code
                         elif source_code and not is_isin(source_code):
                             logger.warning("Tradegate source_code ist keine ISIN: %s", source_code)
+                    elif source == SOURCE_BITFINEX:
+                        symbol = normalize_bitfinex_symbol(source_code)
+                        if symbol:
+                            bitfinex_map.setdefault(symbol, set()).add(key)
 
                 items = [t[0] for t in targets]
                 idx_to_key = {idx + 1: t[1] for idx, t in enumerate(targets)}
@@ -855,6 +878,8 @@ class StreamManager:
                 self.quote_router.trim_keys(all_keys)
                 if self.tradegate_poller:
                     self.tradegate_poller.set_mapping(tradegate_map)
+                if self.bitfinex_stream:
+                    self.bitfinex_stream.set_mapping(bitfinex_map)
 
                 if not self.lightstreamer_enabled:
                     if not items:
@@ -1385,6 +1410,13 @@ def _get_source_price(source: str, key: str) -> Optional[float]:
     return price
 
 
+def _get_source_last_update(source: str, key: str) -> Optional[str]:
+    src = (source or "").strip().lower()
+    if not src or not key:
+        return None
+    return stream_manager.quote_router.source_last_update.get(src, {}).get(key)
+
+
 
 
 def _get_instrument(instrument_id: int) -> Dict[str, Any]:
@@ -1432,6 +1464,8 @@ async def _shutdown() -> None:
             pass
     if stream_manager.tradegate_poller:
         stream_manager.tradegate_poller.stop()
+    if stream_manager.bitfinex_stream:
+        stream_manager.bitfinex_stream.stop()
     _mqtt_disconnect()
 
 
@@ -1594,6 +1628,7 @@ async def list_instrument_source_quotes(instrument_id: int) -> List[Dict[str, An
             {
                 **row,
                 "price": _get_source_price(src, key),
+                "last_update": _get_source_last_update(src, key),
                 "active": (stream_manager.quote_router.best_price_source.get(key) == src),
             }
         )
@@ -1798,6 +1833,7 @@ async def list_fx_rate_source_quotes(fx_id: int) -> List[Dict[str, Any]]:
             {
                 **row,
                 "price": _get_source_price(src, key),
+                "last_update": _get_source_last_update(src, key),
                 "active": (stream_manager.quote_router.best_price_source.get(key) == src),
             }
         )
