@@ -245,6 +245,7 @@
               <table>
                 <thead>
                   <tr>
+                    <th></th>
                     <th>Instrument</th>
                     <th>Positionsname</th>
                     <th class="num">Menge</th>
@@ -322,7 +323,7 @@
     }
 
     async function api(path, options={}) {
-      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      const res = await fetch(path, { cache: "no-store", headers: { "Content-Type": "application/json" }, ...options });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(txt || ("HTTP " + res.status));
@@ -344,7 +345,7 @@
       }, { offset: Number.NEGATIVE_INFINITY }).element;
     }
 
-    function setupRowDrag(tbody, onReorder) {
+    function setupRowDrag(tbody, onReorder, getRowId) {
       let dragging = null;
       tbody.addEventListener("dragstart", (e) => {
         const handle = e.target.closest(".drag-handle");
@@ -372,7 +373,7 @@
       tbody.addEventListener("drop", async () => {
         if (!dragging) return;
         const ids = [...tbody.querySelectorAll("tr")]
-          .map(row => Number(row.dataset.id))
+          .map(row => (getRowId ? getRowId(row) : Number(row.dataset.id)))
           .filter(Boolean);
         if (ids.length) {
           await onReorder(ids);
@@ -448,14 +449,18 @@
         delBtn.textContent = "Loeschen";
         delBtn.onclick = async () => {
           if (!confirm(`Portfolio loeschen?\\n\\n${pf.name} (#${pf.id})`)) return;
-          setStatus("info", "Loesche Portfolio...");
-          await api(`/api/portfolios/${pf.id}`, { method: "DELETE" });
-          await loadPortfolios();
-          if (state.activePortfolioId === pf.id) {
-            state.activePortfolioId = state.portfolios[0]?.id || null;
-            if (state.activePortfolioId) await loadPortfolio(state.activePortfolioId);
+          try {
+            setStatus("info", "Loesche Portfolio...");
+            await api(`/api/portfolios/${pf.id}`, { method: "DELETE" });
+            await loadPortfolios();
+            if (state.activePortfolioId === pf.id) {
+              state.activePortfolioId = state.portfolios[0]?.id || null;
+              if (state.activePortfolioId) await loadPortfolio(state.activePortfolioId);
+            }
+            setStatus("success", "Portfolio geloescht.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
           }
-          setStatus("success", "Portfolio geloescht.");
         };
 
         tdName.appendChild(nameInput);
@@ -485,7 +490,9 @@
       for (const pos of state.positions) {
         const tr = document.createElement("tr");
         tr.dataset.id = pos.id ? String(pos.id) : "";
+        tr.dataset.instrumentId = pos.instrument_id ? String(pos.instrument_id) : "";
         const tdInst = document.createElement("td");
+        const tdDrag = document.createElement("td");
         const tdName = document.createElement("td");
         const tdQty = document.createElement("td");
         const tdEntry = document.createElement("td");
@@ -493,6 +500,12 @@
         const tdActions = document.createElement("td");
         tdQty.className = "num";
         tdEntry.className = "num";
+
+        const dragHandle = document.createElement("span");
+        dragHandle.className = "drag-handle";
+        dragHandle.textContent = "⋮⋮";
+        dragHandle.draggable = true;
+        tdDrag.appendChild(dragHandle);
 
         const instSelect = document.createElement("select");
         renderInstrumentSelect(instSelect, state.instruments, pos.instrument_id);
@@ -557,6 +570,7 @@
         tdCurr.appendChild(currSelect);
         tdActions.appendChild(delBtn);
 
+        tr.appendChild(tdDrag);
         tr.appendChild(tdInst);
         tr.appendChild(tdName);
         tr.appendChild(tdQty);
@@ -659,6 +673,25 @@
       }
     }
 
+    async function savePositionOrder(ids) {
+      if (!ids.length) return;
+      const byInstrument = new Map();
+      for (const p of state.positions) {
+        byInstrument.set(Number(p.instrument_id), p);
+      }
+      const ordered = [];
+      for (const iid of ids) {
+        const item = byInstrument.get(Number(iid));
+        if (item) ordered.push(item);
+      }
+      for (const p of state.positions) {
+        if (!ordered.includes(p)) ordered.push(p);
+      }
+      state.positions = ordered;
+      renderPositions();
+      scheduleSavePositions();
+    }
+
     async function addPosition() {
       const instrumentId = Number(newPositionInstrument.value);
       if (!instrumentId) {
@@ -694,6 +727,7 @@
     };
 
     setupRowDrag(portfoliosTbody, savePortfolioOrder);
+    setupRowDrag(positionsTbody, savePositionOrder, row => Number(row.dataset.instrumentId));
 
     Promise.all([loadInstruments(), loadPortfolios()])
       .then(() => setStatus("success", "Bereit."))
