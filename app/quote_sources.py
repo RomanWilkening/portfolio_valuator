@@ -401,12 +401,13 @@ def load_bitfinex_settings() -> BitfinexSettings:
 
 
 def normalize_bitfinex_symbol(symbol: str) -> Optional[str]:
-    sym = (symbol or "").strip().upper()
-    if not sym:
+    raw = (symbol or "").strip()
+    if not raw:
         return None
-    if sym.startswith("T") or sym.startswith("F"):
-        return sym
-    return "T" + sym
+    sym = raw.upper()
+    if sym[0] in {"T", "F"}:
+        return sym[0].lower() + sym[1:]
+    return "t" + sym
 
 
 def _bitfinex_pick_price(bid: Optional[float], ask: Optional[float], last: Optional[float]) -> tuple[Optional[float], Optional[str]]:
@@ -443,6 +444,8 @@ class BitfinexStream:
         self.last_error: Optional[str] = None
         self.last_connect_at: Optional[str] = None
         self.last_message_at: Optional[str] = None
+        self.last_event: Optional[Dict[str, Any]] = None
+        self.last_event_at: Optional[str] = None
         self.subscribed_symbols: set[str] = set()
         self.acked_symbols: set[str] = set()
 
@@ -475,6 +478,8 @@ class BitfinexStream:
             "acked_symbols": sorted(self.acked_symbols),
             "last_connect_at": self.last_connect_at,
             "last_message_at": self.last_message_at,
+            "last_event": self.last_event,
+            "last_event_at": self.last_event_at,
             "last_error": self.last_error,
             "version": self._version,
         }
@@ -508,18 +513,24 @@ class BitfinexStream:
 
                     while self._enabled and version == self._version:
                         raw = await ws.recv()
+                        self.last_message_at = now_iso()
                         try:
                             msg = json.loads(raw)
                         except Exception:
                             continue
 
                         if isinstance(msg, dict):
+                            self.last_event = msg
+                            self.last_event_at = now_iso()
                             if msg.get("event") == "subscribed" and msg.get("channel") == "ticker":
                                 chan_id = msg.get("chanId")
                                 sym = msg.get("symbol")
                                 if isinstance(chan_id, int) and sym:
                                     chan_to_symbol[chan_id] = sym
                                     self.acked_symbols.add(sym)
+                                    self.status = "subscribed"
+                            elif msg.get("event") == "error":
+                                self.last_error = msg.get("msg") or msg.get("message") or json.dumps(msg)
                             continue
 
                         if not isinstance(msg, list) or len(msg) < 2:
@@ -530,7 +541,7 @@ class BitfinexStream:
                             continue
                         if not isinstance(chan_id, int) or chan_id not in chan_to_symbol:
                             continue
-                        self.last_message_at = now_iso()
+                        self.status = "streaming"
                         symbol = chan_to_symbol[chan_id]
                         data = payload if isinstance(payload, list) else None
                         if not data or len(data) < 7:
