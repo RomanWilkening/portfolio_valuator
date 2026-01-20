@@ -81,6 +81,9 @@ SCHEMA_FIELDS: List[str] = [
     "currentleverage",
 ]
 
+_conn = connect_db()
+init_db(_conn)
+
 
 @dataclass(frozen=True)
 class LightstreamerSettings:
@@ -1562,9 +1565,6 @@ class PortfolioUpdate(BaseModel):
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
-
-_conn = connect_db()
-init_db(_conn)
 
 
 def _normalize_code(code: str) -> str:
