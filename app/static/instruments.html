@@ -173,6 +173,7 @@
                 <th class="num">Prioritaet</th>
                 <th class="num">Preis</th>
                 <th>Aktiv</th>
+                <th>Letztes Update</th>
                 <th></th>
               </tr>
             </thead>
@@ -244,6 +245,7 @@
                 <th class="num">Prioritaet</th>
                 <th class="num">Preis</th>
                 <th>Aktiv</th>
+                <th>Letztes Update</th>
                 <th></th>
               </tr>
             </thead>
@@ -361,6 +363,7 @@
         const tdCurr = document.createElement("td");
         const tdIsin = document.createElement("td");
         const tdLs = document.createElement("td");
+        const tdUpdated = document.createElement("td");
         const tdActions = document.createElement("td");
 
         const codeInput = document.createElement("input");
@@ -526,6 +529,7 @@
         tdPrice.classList.add("num");
         tdPrice.textContent = (src.price === null || src.price === undefined) ? "—" : fmtNum(src.price);
         tdActive.textContent = src.active ? "ja" : "—";
+        tdUpdated.textContent = src.last_update || "—";
 
         const saveRow = async () => {
           setStatus("info", "Speichere Kursquelle...");
@@ -561,6 +565,7 @@
         tr.appendChild(tdPriority);
         tr.appendChild(tdPrice);
         tr.appendChild(tdActive);
+        tr.appendChild(tdUpdated);
         tr.appendChild(tdActions);
         instrumentSourcesTbody.appendChild(tr);
       }
@@ -575,6 +580,7 @@
         const tdPriority = document.createElement("td");
         const tdPrice = document.createElement("td");
         const tdActive = document.createElement("td");
+        const tdUpdated = document.createElement("td");
         const tdActions = document.createElement("td");
 
         tdSource.textContent = (src.source || "").toLowerCase();
@@ -591,6 +597,7 @@
         tdPrice.classList.add("num");
         tdPrice.textContent = (src.price === null || src.price === undefined) ? "—" : fmtNum(src.price);
         tdActive.textContent = src.active ? "ja" : "—";
+        tdUpdated.textContent = src.last_update || "—";
 
         const saveRow = async () => {
           setStatus("info", "Speichere FX-Quelle...");
@@ -626,6 +633,7 @@
         tr.appendChild(tdPriority);
         tr.appendChild(tdPrice);
         tr.appendChild(tdActive);
+        tr.appendChild(tdUpdated);
         tr.appendChild(tdActions);
         fxSourcesTbody.appendChild(tr);
       }
