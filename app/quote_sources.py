@@ -42,15 +42,17 @@ def parse_source_priority(raw: Optional[str]) -> list[str]:
 
 class QuoteRouter:
     def __init__(self, priority: Iterable[str]) -> None:
-        self.priority = [p.strip().lower() for p in priority if p and p.strip()]
-        if not self.priority:
-            self.priority = list(DEFAULT_SOURCE_PRIORITY)
+        self.default_priority = [p.strip().lower() for p in priority if p and p.strip()]
+        if not self.default_priority:
+            self.default_priority = list(DEFAULT_SOURCE_PRIORITY)
+        self.priority_by_key: Dict[str, List[str]] = {}
+        self.known_sources: set[str] = set(self.default_priority)
 
-        self.source_bids: Dict[str, Dict[str, float]] = {s: {} for s in self.priority}
-        self.source_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.priority}
-        self.source_price_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.priority}
-        self.source_watch_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.priority}
-        self.source_watch_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.priority}
+        self.source_bids: Dict[str, Dict[str, float]] = {s: {} for s in self.known_sources}
+        self.source_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.known_sources}
+        self.source_price_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.known_sources}
+        self.source_watch_prices: Dict[str, Dict[str, float]] = {s: {} for s in self.known_sources}
+        self.source_watch_fields: Dict[str, Dict[str, str]] = {s: {} for s in self.known_sources}
 
         self.best_bids: Dict[str, float] = {}
         self.best_bid_source: Dict[str, str] = {}
@@ -61,8 +63,11 @@ class QuoteRouter:
         self.best_watch_fields: Dict[str, str] = {}
         self.best_watch_source: Dict[str, str] = {}
 
+    def _get_priority(self, key: str) -> List[str]:
+        return self.priority_by_key.get(key, self.default_priority)
+
     def _pick_best(self, source_map: Dict[str, Dict[str, float]], key: str) -> tuple[Optional[float], Optional[str]]:
-        for src in self.priority:
+        for src in self._get_priority(key):
             val = source_map.get(src, {}).get(key)
             if val is not None:
                 return val, src
@@ -145,8 +150,15 @@ class QuoteRouter:
         watch_field: Optional[str] = None,
     ) -> bool:
         src = (source or "").strip().lower()
-        if not src or src not in self.priority:
+        if not src:
             return False
+        if src not in self.known_sources:
+            self.known_sources.add(src)
+            self.source_bids.setdefault(src, {})
+            self.source_prices.setdefault(src, {})
+            self.source_price_fields.setdefault(src, {})
+            self.source_watch_prices.setdefault(src, {})
+            self.source_watch_fields.setdefault(src, {})
         changed = False
         if bid is not None:
             self.source_bids.setdefault(src, {})[key] = float(bid)
@@ -201,6 +213,20 @@ class QuoteRouter:
                 self.best_watch_source.pop(key, None)
                 changed = True
         return changed
+
+    def set_priorities(self, priorities: Dict[str, List[str]]) -> None:
+        self.priority_by_key = {}
+        for key, sources in (priorities or {}).items():
+            clean = [s.strip().lower() for s in sources if s and s.strip()]
+            if clean:
+                self.priority_by_key[key] = clean
+                self.known_sources.update(clean)
+        for src in list(self.known_sources):
+            self.source_bids.setdefault(src, {})
+            self.source_prices.setdefault(src, {})
+            self.source_price_fields.setdefault(src, {})
+            self.source_watch_prices.setdefault(src, {})
+            self.source_watch_fields.setdefault(src, {})
 
 
 @dataclass(frozen=True)
