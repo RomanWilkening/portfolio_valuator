@@ -446,8 +446,12 @@
         const txt = await res.text().catch(() => "");
         throw new Error(txt || ("HTTP " + res.status));
       }
+      if (res.status === 204) return null;
       const ct = res.headers.get("content-type") || "";
-      if (ct.includes("application/json")) return await res.json();
+      if (ct.includes("application/json")) {
+        const txt = await res.text();
+        return txt ? JSON.parse(txt) : null;
+      }
       return await res.text();
     }
 
