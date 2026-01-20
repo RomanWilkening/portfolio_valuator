@@ -1498,7 +1498,27 @@ async def index():
 
 @app.get("/manage")
 async def manage():
-    return FileResponse("app/static/manage.html")
+    return FileResponse("app/static/positions.html")
+
+
+@app.get("/positions")
+async def positions_page():
+    return FileResponse("app/static/positions.html")
+
+
+@app.get("/watchlist")
+async def watchlist_page():
+    return FileResponse("app/static/watchlist.html")
+
+
+@app.get("/sources")
+async def sources_page():
+    return FileResponse("app/static/sources.html")
+
+
+@app.get("/settings")
+async def settings_page():
+    return FileResponse("app/static/settings.html")
 
 
 @app.get("/instruments")
