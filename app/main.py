@@ -662,10 +662,10 @@ class StreamManager:
         self._task: Optional[asyncio.Task] = None
 
         self.quote_router = QuoteRouter(QUOTE_SOURCE_PRIORITY)
-        self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.priority
+        self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.default_priority
         self.tradegate_poller: Optional[TradegatePoller] = None
         self.instrument_by_code: Dict[str, Dict[str, Any]] = {}
-        if SOURCE_TRADEGATE in self.quote_router.priority:
+        if SOURCE_TRADEGATE in self.quote_router.default_priority:
             self.tradegate_poller = TradegatePoller(
                 settings=TRADEGATE_SETTINGS,
                 router=self.quote_router,
