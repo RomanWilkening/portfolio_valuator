@@ -65,6 +65,26 @@ class QuoteRouter:
         self.best_watch_fields: Dict[str, str] = {}
         self.best_watch_source: Dict[str, str] = {}
 
+    def set_default_priority(self, priority: Iterable[str]) -> None:
+        new_priority = [p.strip().lower() for p in priority if p and p.strip()]
+        if not new_priority:
+            new_priority = list(DEFAULT_SOURCE_PRIORITY)
+        self.default_priority = new_priority
+        for src in new_priority:
+            if src not in self.known_sources:
+                self.known_sources.add(src)
+                self.source_bids.setdefault(src, {})
+                self.source_prices.setdefault(src, {})
+                self.source_price_fields.setdefault(src, {})
+                self.source_watch_prices.setdefault(src, {})
+                self.source_watch_fields.setdefault(src, {})
+                self.source_last_update.setdefault(src, {})
+        keys = set(self.best_bids.keys()) | set(self.best_prices.keys()) | set(self.best_watch_prices.keys())
+        for key in keys:
+            self._refresh_best_bid(key)
+            self._refresh_best_price(key)
+            self._refresh_best_watch(key)
+
     def _get_priority(self, key: str) -> List[str]:
         return self.priority_by_key.get(key, self.default_priority)
 

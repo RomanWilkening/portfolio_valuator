@@ -1,5 +1,6 @@
 import os
 import re
+import socket
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -162,6 +163,70 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE watchlist SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
     except Exception:
         pass
+
+    def _set_default_setting(key: str, value: Optional[str]) -> None:
+        if value is None:
+            return
+        row = conn.execute("SELECT 1 FROM app_settings WHERE key=?", (key,)).fetchone()
+        if row:
+            return
+        conn.execute("INSERT INTO app_settings(key, value) VALUES (?, ?)", (key, str(value)))
+
+    ls_user_agent_default = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    _set_default_setting("ls_wss_url", (os.getenv("LS_WSS_URL") or "").strip() or "wss://push.bnpparibas.com/lightstreamer")
+    _set_default_setting("ls_subprotocol", (os.getenv("LS_SUBPROTOCOL") or "").strip() or "TLCP-2.5.0.lightstreamer.com")
+    _set_default_setting("ls_adapter_set", (os.getenv("LS_ADAPTER_SET") or "").strip() or "SmarthouseFeed")
+    _set_default_setting("ls_data_adapter", (os.getenv("LS_DATA_ADAPTER") or "").strip() or "MDS5")
+    _set_default_setting("ls_cid", (os.getenv("LS_CID") or "").strip() or "pcYgxn8m8 feOojyA1V661f3g2.pz482h95IL5h")
+    _set_default_setting("ls_item_template", (os.getenv("LS_ITEM_TEMPLATE") or "").strip() or "X0000010800{isin}")
+    _set_default_setting("ls_origin", (os.getenv("LS_ORIGIN") or "").strip() or "https://derivate.bnpparibas.com")
+    _set_default_setting("ls_user_agent", (os.getenv("LS_USER_AGENT") or "").strip() or ls_user_agent_default)
+    _set_default_setting("ls_reconnect_min_s", (os.getenv("LS_RECONNECT_MIN_S") or "").strip() or "1.0")
+    _set_default_setting("ls_reconnect_max_s", (os.getenv("LS_RECONNECT_MAX_S") or "").strip() or "30.0")
+    _set_default_setting("ls_recv_timeout_s", (os.getenv("LS_RECV_TIMEOUT_S") or "").strip() or "35.0")
+    _set_default_setting("ls_stale_restart_s", (os.getenv("LS_STALE_RESTART_S") or "").strip() or "90.0")
+
+    _set_default_setting(
+        "quote_source_priority",
+        (os.getenv("QUOTE_SOURCE_PRIORITY") or "").strip() or "lightstreamer,tradegate,bitfinex",
+    )
+
+    _set_default_setting(
+        "tradegate_url_template",
+        (os.getenv("TRADEGATE_URL_TEMPLATE") or "").strip() or "https://www.tradegate.de/refresh.php?isin={isin}",
+    )
+    _set_default_setting("tradegate_poll_s", (os.getenv("TRADEGATE_POLL_S") or "").strip() or "10")
+    _set_default_setting("tradegate_timeout_s", (os.getenv("TRADEGATE_TIMEOUT_S") or "").strip() or "5")
+    _set_default_setting("tradegate_user_agent", (os.getenv("TRADEGATE_USER_AGENT") or "").strip() or "portfolio-valuator/1.0")
+
+    _set_default_setting("bitfinex_wss_url", (os.getenv("BITFINEX_WSS_URL") or "").strip() or "wss://api-pub.bitfinex.com/ws/2")
+    _set_default_setting("bitfinex_reconnect_min_s", (os.getenv("BITFINEX_RECONNECT_MIN_S") or "").strip() or "1.0")
+    _set_default_setting("bitfinex_reconnect_max_s", (os.getenv("BITFINEX_RECONNECT_MAX_S") or "").strip() or "30.0")
+
+    node_id_default = (os.getenv("MQTT_NODE_ID") or "").strip() or "portfolio_valuator"
+    base_topic_default = (os.getenv("MQTT_BASE_TOPIC") or "").strip() or f"portfolio_valuator/{node_id_default}"
+    client_id_default = (os.getenv("MQTT_CLIENT_ID") or "").strip() or f"portfolio-valuator-{socket.gethostname()}"
+    _set_default_setting("mqtt_enabled", (os.getenv("MQTT_ENABLED") or "").strip() or "false")
+    _set_default_setting("mqtt_host", (os.getenv("MQTT_HOST") or "").strip() or "")
+    _set_default_setting("mqtt_port", (os.getenv("MQTT_PORT") or "").strip() or "1883")
+    _set_default_setting("mqtt_username", (os.getenv("MQTT_USERNAME") or "").strip() or "")
+    _set_default_setting("mqtt_password", (os.getenv("MQTT_PASSWORD") or "").strip() or "")
+    _set_default_setting("mqtt_client_id", client_id_default)
+    _set_default_setting("mqtt_discovery_prefix", (os.getenv("MQTT_DISCOVERY_PREFIX") or "").strip() or "homeassistant")
+    _set_default_setting("mqtt_node_id", node_id_default)
+    _set_default_setting("mqtt_base_topic", base_topic_default)
+    _set_default_setting("mqtt_qos", (os.getenv("MQTT_QOS") or "").strip() or "0")
+    _set_default_setting("mqtt_retain", (os.getenv("MQTT_RETAIN") or "").strip() or "true")
+    _set_default_setting("mqtt_debounce_ms", (os.getenv("MQTT_DEBOUNCE_MS") or "").strip() or "0")
+    _set_default_setting("mqtt_sanity_skip_zero_price", (os.getenv("MQTT_SANITY_SKIP_ZERO_PRICE") or "").strip() or "true")
+    _set_default_setting("mqtt_sanity_max_pct_change", (os.getenv("MQTT_SANITY_MAX_PCT_CHANGE") or "").strip() or "0")
+    _set_default_setting(
+        "mqtt_sanity_require_price_for_valuation",
+        (os.getenv("MQTT_SANITY_REQUIRE_PRICE_FOR_VALUATION") or "").strip() or "true",
+    )
 
     def _is_isin(value: str) -> bool:
         return bool(re.fullmatch(r"[A-Z0-9]{12}", (value or "").strip().upper()))

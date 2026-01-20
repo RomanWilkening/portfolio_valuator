@@ -102,6 +102,13 @@
       background: transparent;
       color: var(--accent);
     }
+    input {
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font-size: 14px;
+    }
     .card {
       background: var(--card);
       border: 1px solid var(--line);
@@ -120,6 +127,33 @@
     .status.warn { background: #fff2dc; color: #8a5a17; }
     .status.error { background: #ffe7ea; color: #8f1d2f; }
     .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .form-grid {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .field label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .field .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: var(--text);
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    input[type="checkbox"] { width: auto; }
     .pill {
       display: inline-block;
       padding: 4px 10px;
@@ -176,7 +210,7 @@
 
         <section class="card" style="margin-top: 16px;">
           <h2>MQTT (Home Assistant)</h2>
-          <div class="sub">Verbindungsdaten aus config/app.env</div>
+          <div class="sub">Verbindungsdaten in der Datenbank</div>
           <div class="inline-form" style="margin-top: 12px;">
             <span class="pill">Status: <strong id="mqttStatus">—</strong></span>
             <button id="mqttToggleBtn" class="button">MQTT einschalten</button>
@@ -184,6 +218,66 @@
           </div>
           <div class="sub" style="margin-top: 10px;">
             Availability Topic: <code id="mqttAvailability">—</code>
+          </div>
+
+          <div class="form-grid">
+            <div class="field">
+              <label for="mqttHost">Host</label>
+              <input id="mqttHost" placeholder="mqtt.local" />
+            </div>
+            <div class="field">
+              <label for="mqttPort">Port</label>
+              <input id="mqttPort" type="number" min="1" max="65535" />
+            </div>
+            <div class="field">
+              <label for="mqttUsername">Username</label>
+              <input id="mqttUsername" placeholder="optional" />
+            </div>
+            <div class="field">
+              <label for="mqttPassword">Password</label>
+              <input id="mqttPassword" type="password" placeholder="optional" />
+            </div>
+            <div class="field">
+              <label for="mqttClientId">Client ID</label>
+              <input id="mqttClientId" placeholder="portfolio-valuator" />
+            </div>
+            <div class="field">
+              <label for="mqttDiscovery">Discovery Prefix</label>
+              <input id="mqttDiscovery" placeholder="homeassistant" />
+            </div>
+            <div class="field">
+              <label for="mqttNodeId">Node ID</label>
+              <input id="mqttNodeId" placeholder="portfolio_valuator" />
+            </div>
+            <div class="field">
+              <label for="mqttBaseTopic">Base Topic</label>
+              <input id="mqttBaseTopic" placeholder="portfolio_valuator/portfolio_valuator" />
+            </div>
+            <div class="field">
+              <label for="mqttQos">QoS</label>
+              <input id="mqttQos" type="number" min="0" max="2" />
+            </div>
+            <div class="field">
+              <label for="mqttDebounce">Debounce (ms)</label>
+              <input id="mqttDebounce" type="number" min="0" />
+            </div>
+            <div class="field">
+              <label class="checkbox"><input id="mqttRetain" type="checkbox" /> Retain</label>
+            </div>
+            <div class="field">
+              <label class="checkbox"><input id="mqttSkipZero" type="checkbox" /> Skip 0‑Preis</label>
+            </div>
+            <div class="field">
+              <label for="mqttMaxPct">Max % Sprung</label>
+              <input id="mqttMaxPct" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label class="checkbox"><input id="mqttRequirePrice" type="checkbox" /> Bewertung nur mit Kurs</label>
+            </div>
+          </div>
+
+          <div class="inline-form" style="margin-top: 12px;">
+            <button id="saveMqttBtn" class="button">Speichern</button>
           </div>
         </section>
       </div>
@@ -209,6 +303,21 @@
     const mqttToggleBtn = document.getElementById("mqttToggleBtn");
     const mqttReloadBtn = document.getElementById("mqttReloadBtn");
     const mqttAvailabilityEl = document.getElementById("mqttAvailability");
+    const mqttHostEl = document.getElementById("mqttHost");
+    const mqttPortEl = document.getElementById("mqttPort");
+    const mqttUsernameEl = document.getElementById("mqttUsername");
+    const mqttPasswordEl = document.getElementById("mqttPassword");
+    const mqttClientIdEl = document.getElementById("mqttClientId");
+    const mqttDiscoveryEl = document.getElementById("mqttDiscovery");
+    const mqttNodeIdEl = document.getElementById("mqttNodeId");
+    const mqttBaseTopicEl = document.getElementById("mqttBaseTopic");
+    const mqttQosEl = document.getElementById("mqttQos");
+    const mqttDebounceEl = document.getElementById("mqttDebounce");
+    const mqttRetainEl = document.getElementById("mqttRetain");
+    const mqttSkipZeroEl = document.getElementById("mqttSkipZero");
+    const mqttMaxPctEl = document.getElementById("mqttMaxPct");
+    const mqttRequirePriceEl = document.getElementById("mqttRequirePrice");
+    const saveMqttBtn = document.getElementById("saveMqttBtn");
 
     function setStatus(level, message) {
       statusEl.className = "status " + level;
@@ -243,6 +352,48 @@
       return s;
     }
 
+    async function loadMqttConfig() {
+      const s = await api("/api/settings/mqtt");
+      mqttHostEl.value = s.host || "";
+      mqttPortEl.value = s.port ?? 1883;
+      mqttUsernameEl.value = s.username || "";
+      mqttPasswordEl.value = s.password || "";
+      mqttClientIdEl.value = s.client_id || "";
+      mqttDiscoveryEl.value = s.discovery_prefix || "";
+      mqttNodeIdEl.value = s.node_id || "";
+      mqttBaseTopicEl.value = s.base_topic || "";
+      mqttQosEl.value = s.qos ?? 0;
+      mqttDebounceEl.value = s.debounce_ms ?? 0;
+      mqttRetainEl.checked = !!s.retain;
+      mqttSkipZeroEl.checked = !!s.sanity_skip_zero_price;
+      mqttMaxPctEl.value = s.sanity_max_pct_change ?? 0;
+      mqttRequirePriceEl.checked = !!s.sanity_require_price_for_valuation;
+      return s;
+    }
+
+    async function saveMqttConfig() {
+      const payload = {
+        host: mqttHostEl.value.trim(),
+        port: Number(mqttPortEl.value || 1883),
+        username: mqttUsernameEl.value.trim(),
+        password: mqttPasswordEl.value,
+        client_id: mqttClientIdEl.value.trim(),
+        discovery_prefix: mqttDiscoveryEl.value.trim(),
+        node_id: mqttNodeIdEl.value.trim(),
+        base_topic: mqttBaseTopicEl.value.trim(),
+        qos: Number(mqttQosEl.value || 0),
+        debounce_ms: Number(mqttDebounceEl.value || 0),
+        retain: !!mqttRetainEl.checked,
+        sanity_skip_zero_price: !!mqttSkipZeroEl.checked,
+        sanity_max_pct_change: Number(mqttMaxPctEl.value || 0),
+        sanity_require_price_for_valuation: !!mqttRequirePriceEl.checked,
+      };
+      setStatus("info", "Speichere MQTT-Einstellungen...");
+      await api("/api/settings/mqtt", { method: "PUT", body: JSON.stringify(payload) });
+      await loadMqttStatus();
+      setStatus("success", "MQTT-Einstellungen gespeichert.");
+    }
+
     async function toggleMqtt() {
       const s = await api("/api/mqtt");
       const next = !s.enabled;
@@ -252,10 +403,12 @@
       setStatus("success", next ? "MQTT ist an." : "MQTT ist aus.");
     }
 
-    mqttReloadBtn.onclick = () => loadMqttStatus().catch(e => setStatus("error", String(e.message || e)));
+    mqttReloadBtn.onclick = () => Promise.all([loadMqttStatus(), loadMqttConfig()])
+      .catch(e => setStatus("error", String(e.message || e)));
     mqttToggleBtn.onclick = () => toggleMqtt().catch(e => setStatus("error", String(e.message || e)));
+    saveMqttBtn.onclick = () => saveMqttConfig().catch(e => setStatus("error", String(e.message || e)));
 
-    loadMqttStatus()
+    Promise.all([loadMqttStatus(), loadMqttConfig()])
       .then(() => setStatus("success", "Bereit."))
       .catch(e => setStatus("error", String(e.message || e)));
   </script>

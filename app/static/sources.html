@@ -96,7 +96,31 @@
       padding: 16px;
       box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
     }
+    input {
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font-size: 14px;
+    }
     .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .form-grid {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .field label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
     .status {
       margin-top: 12px;
       padding: 10px 12px;
@@ -189,6 +213,117 @@
             </table>
           </div>
         </section>
+
+        <section class="card" style="margin-top: 16px;">
+          <h2>Lightstreamer</h2>
+          <div class="sub">Streaming-Quelle (BNP)</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="lsWssUrl">WSS URL</label>
+              <input id="lsWssUrl" />
+            </div>
+            <div class="field">
+              <label for="lsSubprotocol">Subprotocol</label>
+              <input id="lsSubprotocol" placeholder="optional" />
+            </div>
+            <div class="field">
+              <label for="lsAdapterSet">Adapter Set</label>
+              <input id="lsAdapterSet" />
+            </div>
+            <div class="field">
+              <label for="lsDataAdapter">Data Adapter</label>
+              <input id="lsDataAdapter" />
+            </div>
+            <div class="field">
+              <label for="lsCid">Client ID</label>
+              <input id="lsCid" />
+            </div>
+            <div class="field">
+              <label for="lsItemTemplate">Item Template</label>
+              <input id="lsItemTemplate" placeholder="X0000010800{isin}" />
+            </div>
+            <div class="field">
+              <label for="lsOrigin">Origin</label>
+              <input id="lsOrigin" placeholder="optional" />
+            </div>
+            <div class="field">
+              <label for="lsUserAgent">User Agent</label>
+              <input id="lsUserAgent" />
+            </div>
+            <div class="field">
+              <label for="lsReconnectMin">Reconnect Min (s)</label>
+              <input id="lsReconnectMin" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label for="lsReconnectMax">Reconnect Max (s)</label>
+              <input id="lsReconnectMax" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label for="lsRecvTimeout">Recv Timeout (s)</label>
+              <input id="lsRecvTimeout" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label for="lsStaleRestart">Stale Restart (s)</label>
+              <input id="lsStaleRestart" type="number" min="0" step="any" />
+            </div>
+          </div>
+        </section>
+
+        <section class="card" style="margin-top: 16px;">
+          <h2>Tradegate</h2>
+          <div class="sub">HTTP-Polling</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="tgUrlTemplate">URL Template</label>
+              <input id="tgUrlTemplate" />
+            </div>
+            <div class="field">
+              <label for="tgPoll">Polling (s)</label>
+              <input id="tgPoll" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label for="tgTimeout">Timeout (s)</label>
+              <input id="tgTimeout" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label for="tgUserAgent">User Agent</label>
+              <input id="tgUserAgent" />
+            </div>
+          </div>
+        </section>
+
+        <section class="card" style="margin-top: 16px;">
+          <h2>Bitfinex</h2>
+          <div class="sub">WebSocket</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="bfWssUrl">WSS URL</label>
+              <input id="bfWssUrl" />
+            </div>
+            <div class="field">
+              <label for="bfReconnectMin">Reconnect Min (s)</label>
+              <input id="bfReconnectMin" type="number" min="0" step="any" />
+            </div>
+            <div class="field">
+              <label for="bfReconnectMax">Reconnect Max (s)</label>
+              <input id="bfReconnectMax" type="number" min="0" step="any" />
+            </div>
+          </div>
+        </section>
+
+        <section class="card" style="margin-top: 16px;">
+          <h2>Default Prioritaet</h2>
+          <div class="sub">Fallback-Reihenfolge (CSV)</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="defaultPriority">Reihenfolge</label>
+              <input id="defaultPriority" placeholder="lightstreamer,tradegate,bitfinex" />
+            </div>
+          </div>
+          <div class="inline-form" style="margin-top: 12px;">
+            <button id="saveSourcesBtn" class="button">Speichern</button>
+          </div>
+        </section>
       </div>
     </main>
   </div>
@@ -197,6 +332,27 @@
     const statusEl = document.getElementById("status");
     const sourcesTbody = document.getElementById("sourcesTbody");
     const updatedAtEl = document.getElementById("updatedAt");
+    const lsWssUrlEl = document.getElementById("lsWssUrl");
+    const lsSubprotocolEl = document.getElementById("lsSubprotocol");
+    const lsAdapterSetEl = document.getElementById("lsAdapterSet");
+    const lsDataAdapterEl = document.getElementById("lsDataAdapter");
+    const lsCidEl = document.getElementById("lsCid");
+    const lsItemTemplateEl = document.getElementById("lsItemTemplate");
+    const lsOriginEl = document.getElementById("lsOrigin");
+    const lsUserAgentEl = document.getElementById("lsUserAgent");
+    const lsReconnectMinEl = document.getElementById("lsReconnectMin");
+    const lsReconnectMaxEl = document.getElementById("lsReconnectMax");
+    const lsRecvTimeoutEl = document.getElementById("lsRecvTimeout");
+    const lsStaleRestartEl = document.getElementById("lsStaleRestart");
+    const tgUrlTemplateEl = document.getElementById("tgUrlTemplate");
+    const tgPollEl = document.getElementById("tgPoll");
+    const tgTimeoutEl = document.getElementById("tgTimeout");
+    const tgUserAgentEl = document.getElementById("tgUserAgent");
+    const bfWssUrlEl = document.getElementById("bfWssUrl");
+    const bfReconnectMinEl = document.getElementById("bfReconnectMin");
+    const bfReconnectMaxEl = document.getElementById("bfReconnectMax");
+    const defaultPriorityEl = document.getElementById("defaultPriority");
+    const saveSourcesBtn = document.getElementById("saveSourcesBtn");
     const navToggle = document.getElementById("navToggle");
     const storedNav = localStorage.getItem("pv_nav_collapsed");
     if (storedNav === "1") document.body.classList.add("nav-collapsed");
@@ -234,6 +390,60 @@
       if (n === null || n === undefined) return "—";
       if (!isFinite(n)) return "—";
       return Number(n).toLocaleString();
+    }
+
+    async function loadSourceSettings() {
+      const s = await api("/api/settings/sources");
+      lsWssUrlEl.value = s.ls_wss_url || "";
+      lsSubprotocolEl.value = s.ls_subprotocol || "";
+      lsAdapterSetEl.value = s.ls_adapter_set || "";
+      lsDataAdapterEl.value = s.ls_data_adapter || "";
+      lsCidEl.value = s.ls_cid || "";
+      lsItemTemplateEl.value = s.ls_item_template || "";
+      lsOriginEl.value = s.ls_origin || "";
+      lsUserAgentEl.value = s.ls_user_agent || "";
+      lsReconnectMinEl.value = s.ls_reconnect_min_s ?? 0;
+      lsReconnectMaxEl.value = s.ls_reconnect_max_s ?? 0;
+      lsRecvTimeoutEl.value = s.ls_recv_timeout_s ?? 0;
+      lsStaleRestartEl.value = s.ls_stale_restart_s ?? 0;
+      tgUrlTemplateEl.value = s.tradegate_url_template || "";
+      tgPollEl.value = s.tradegate_poll_s ?? 0;
+      tgTimeoutEl.value = s.tradegate_timeout_s ?? 0;
+      tgUserAgentEl.value = s.tradegate_user_agent || "";
+      bfWssUrlEl.value = s.bitfinex_wss_url || "";
+      bfReconnectMinEl.value = s.bitfinex_reconnect_min_s ?? 0;
+      bfReconnectMaxEl.value = s.bitfinex_reconnect_max_s ?? 0;
+      defaultPriorityEl.value = s.quote_source_priority || "";
+      return s;
+    }
+
+    async function saveSourceSettings() {
+      const payload = {
+        quote_source_priority: defaultPriorityEl.value.trim(),
+        ls_wss_url: lsWssUrlEl.value.trim(),
+        ls_subprotocol: lsSubprotocolEl.value.trim(),
+        ls_adapter_set: lsAdapterSetEl.value.trim(),
+        ls_data_adapter: lsDataAdapterEl.value.trim(),
+        ls_cid: lsCidEl.value.trim(),
+        ls_item_template: lsItemTemplateEl.value.trim(),
+        ls_origin: lsOriginEl.value.trim(),
+        ls_user_agent: lsUserAgentEl.value.trim(),
+        ls_reconnect_min_s: Number(lsReconnectMinEl.value || 0),
+        ls_reconnect_max_s: Number(lsReconnectMaxEl.value || 0),
+        ls_recv_timeout_s: Number(lsRecvTimeoutEl.value || 0),
+        ls_stale_restart_s: Number(lsStaleRestartEl.value || 0),
+        tradegate_url_template: tgUrlTemplateEl.value.trim(),
+        tradegate_poll_s: Number(tgPollEl.value || 0),
+        tradegate_timeout_s: Number(tgTimeoutEl.value || 0),
+        tradegate_user_agent: tgUserAgentEl.value.trim(),
+        bitfinex_wss_url: bfWssUrlEl.value.trim(),
+        bitfinex_reconnect_min_s: Number(bfReconnectMinEl.value || 0),
+        bitfinex_reconnect_max_s: Number(bfReconnectMaxEl.value || 0),
+      };
+      setStatus("info", "Speichere Kursquellen-Einstellungen...");
+      await api("/api/settings/sources", { method: "PUT", body: JSON.stringify(payload) });
+      await loadSourceSettings();
+      setStatus("success", "Kursquellen-Einstellungen gespeichert.");
     }
 
     async function loadSources() {
@@ -296,7 +506,10 @@
       }
     }
 
+    saveSourcesBtn.onclick = () => saveSourceSettings().catch(e => setStatus("error", String(e.message || e)));
+
     refreshLoop();
+    loadSourceSettings().catch(e => setStatus("error", String(e.message || e)));
     setInterval(refreshLoop, 10000);
   </script>
 </body>

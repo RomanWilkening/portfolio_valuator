@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
+import sqlite3
+
 import paho.mqtt.client as mqtt
+
+from app.settings import get_bool, get_float, get_int, get_setting
 
 logger = logging.getLogger("portfolio-valuator.mqtt")
 
@@ -61,30 +65,45 @@ class MqttSettings:
         return f"{self.base_topic}/availability"
 
 
-def load_mqtt_settings() -> MqttSettings:
-    host = (os.getenv("MQTT_HOST") or "").strip()
-    node_id = (os.getenv("MQTT_NODE_ID") or "").strip() or "portfolio_valuator"
-    base_topic = (os.getenv("MQTT_BASE_TOPIC") or "").strip() or f"portfolio_valuator/{node_id}"
+def load_mqtt_settings(conn: Optional[sqlite3.Connection] = None) -> MqttSettings:
+    if conn is None:
+        host = (os.getenv("MQTT_HOST") or "").strip()
+        node_id = (os.getenv("MQTT_NODE_ID") or "").strip() or "portfolio_valuator"
+        base_topic = (os.getenv("MQTT_BASE_TOPIC") or "").strip() or f"portfolio_valuator/{node_id}"
+        return MqttSettings(
+            host=host,
+            port=int(os.getenv("MQTT_PORT", "1883")),
+            username=(os.getenv("MQTT_USERNAME") or "").strip() or None,
+            password=(os.getenv("MQTT_PASSWORD") or "").strip() or None,
+            client_id=(os.getenv("MQTT_CLIENT_ID") or "").strip() or f"portfolio-valuator-{socket.gethostname()}",
+            discovery_prefix=(os.getenv("MQTT_DISCOVERY_PREFIX") or "").strip() or "homeassistant",
+            node_id=node_id,
+            base_topic=base_topic,
+            qos=int(os.getenv("MQTT_QOS", "0")),
+            retain=_env_bool("MQTT_RETAIN", default=True),
+            debounce_ms=int(os.getenv("MQTT_DEBOUNCE_MS", "0")),
+            sanity_skip_zero_price=_env_bool("MQTT_SANITY_SKIP_ZERO_PRICE", default=True),
+            sanity_max_pct_change=_env_float("MQTT_SANITY_MAX_PCT_CHANGE", default=0.0),
+            sanity_require_price_for_valuation=_env_bool("MQTT_SANITY_REQUIRE_PRICE_FOR_VALUATION", default=True),
+        )
 
+    node_id = (get_setting(conn, "mqtt_node_id", "") or "").strip() or "portfolio_valuator"
+    base_topic = (get_setting(conn, "mqtt_base_topic", "") or "").strip() or f"portfolio_valuator/{node_id}"
     return MqttSettings(
-        host=host,
-        port=int(os.getenv("MQTT_PORT", "1883")),
-        username=(os.getenv("MQTT_USERNAME") or "").strip() or None,
-        password=(os.getenv("MQTT_PASSWORD") or "").strip() or None,
-        client_id=(os.getenv("MQTT_CLIENT_ID") or "").strip() or f"portfolio-valuator-{socket.gethostname()}",
-        discovery_prefix=(os.getenv("MQTT_DISCOVERY_PREFIX") or "").strip() or "homeassistant",
+        host=(get_setting(conn, "mqtt_host", "") or "").strip(),
+        port=get_int(conn, "mqtt_port", default=1883),
+        username=(get_setting(conn, "mqtt_username", "") or "").strip() or None,
+        password=(get_setting(conn, "mqtt_password", "") or "").strip() or None,
+        client_id=(get_setting(conn, "mqtt_client_id", "") or "").strip() or f"portfolio-valuator-{socket.gethostname()}",
+        discovery_prefix=(get_setting(conn, "mqtt_discovery_prefix", "") or "").strip() or "homeassistant",
         node_id=node_id,
         base_topic=base_topic,
-        qos=int(os.getenv("MQTT_QOS", "0")),
-        retain=_env_bool("MQTT_RETAIN", default=True),
-        # Default 0 => publish every push (no debounce)
-        debounce_ms=int(os.getenv("MQTT_DEBOUNCE_MS", "0")),
-        # Sanity checks
-        sanity_skip_zero_price=_env_bool("MQTT_SANITY_SKIP_ZERO_PRICE", default=True),
-        # 0 disables jump filtering. Otherwise: max % change per update before skipping the update.
-        sanity_max_pct_change=_env_float("MQTT_SANITY_MAX_PCT_CHANGE", default=0.0),
-        # If true: don't publish portfolio/position valuation sensors when no price is available.
-        sanity_require_price_for_valuation=_env_bool("MQTT_SANITY_REQUIRE_PRICE_FOR_VALUATION", default=True),
+        qos=get_int(conn, "mqtt_qos", default=0),
+        retain=get_bool(conn, "mqtt_retain", default=True),
+        debounce_ms=get_int(conn, "mqtt_debounce_ms", default=0),
+        sanity_skip_zero_price=get_bool(conn, "mqtt_sanity_skip_zero_price", default=True),
+        sanity_max_pct_change=get_float(conn, "mqtt_sanity_max_pct_change", default=0.0),
+        sanity_require_price_for_valuation=get_bool(conn, "mqtt_sanity_require_price_for_valuation", default=True),
     )
 
 
