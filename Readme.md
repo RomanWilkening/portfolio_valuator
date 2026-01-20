@@ -45,7 +45,7 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 - **Positionen** verknuepfen Instrumente mit Portfolios (Menge, Entry, Positionsname).
 - **Watchlist** verknuepft Instrumente fuer Live-Kurse.
 - Instrument-Codes muessen **nicht** ISINs sein; fuer Kurse nutze optional ISIN/LS Item.
-- Lightstreamer nutzt `LS_ITEM_TEMPLATE` mit ISIN oder explizites `LS Item` am Instrument.
+- Lightstreamer nutzt das Item-Template aus den **Kursquellen-Einstellungen** (oder ein explizites `LS Item` am Instrument).
 - Tradegate nutzt die ISIN am Instrument (falls gesetzt).
 - Kursquellen werden pro Instrument/FX gepflegt (Quelle + Source-ID + Prioritaet).
 
@@ -58,33 +58,16 @@ Im Dashboard kannst du zusaetzlich zu Portfolios eine **Watchlist** pflegen (Ins
 - Default DB-Pfad: `data/app.db`
 - Override via ENV: `DB_PATH=/pfad/zur/app.db`
 
-### BNP / Lightstreamer (ENV)
+### Kursquellen-Konfiguration
 
-Die Defaults sind auf die bisherige BNP-Lightstreamer-Konfiguration ausgelegt. Bei Bedarf per ENV anpassen:
+Alle Quell-spezifischen Einstellungen (Lightstreamer, Tradegate, Bitfinex, Default-Prioritaet) sind im Tab **Kursquellen** pflegbar.
 
-- `LS_WSS_URL` (default: `wss://push.bnpparibas.com/lightstreamer`)
-- `LS_ADAPTER_SET` (default: `SmarthouseFeed`)
-- `LS_DATA_ADAPTER` (default: `MDS5`)
-- `LS_ITEM_TEMPLATE` (default: `X0000010800{isin}`)
-- `LS_ORIGIN` (default: `https://derivate.bnpparibas.com`, leer setzen zum Deaktivieren)
-- `LS_BID_TIMEOUT` (default: `8`)
-
-### Kursquellen & Prioritaet
-
-- `QUOTE_SOURCE_PRIORITY` (default: `lightstreamer,tradegate`)
 - Reihenfolge = Prioritaet. Pro Titel wird die erste Quelle mit Kurs verwendet.
 - ISINs koennen mehrere Quellen haben; LS Items koennen beliebige Lightstreamer-Item-IDs sein.
 
-### Tradegate (ENV)
-
-- `TRADEGATE_URL_TEMPLATE` (default: `https://www.tradegate.de/refresh.php?isin={isin}`)
-- `TRADEGATE_POLL_S` (default: `10`)
-- `TRADEGATE_TIMEOUT_S` (default: `5`)
-- `TRADEGATE_USER_AGENT` (optional)
-
 ### MQTT → Home Assistant (Auto-Detect)
 
-Wenn `MQTT_HOST` gesetzt ist, kannst du MQTT im Webinterface (Portfolio-Pflege) **aktivieren**. Default ist **aus**.
+Die MQTT-Konfiguration liegt in **Einstellungen**. MQTT wird dort aktiviert/deaktiviert.
 
 - Es werden **mehrere Sensoren** per Auto-Discovery angelegt:
   - pro **Portfolio**: Wert/Basis/Performance/Performance%
@@ -92,7 +75,4 @@ Wenn `MQTT_HOST` gesetzt ist, kannst du MQTT im Webinterface (Portfolio-Pflege) 
   - pro **Watchlist-Eintrag**: Kurs
 - Währungswerte werden als **`device_class: monetary`** mit **`unit_of_measurement`** (z.B. EUR/USD) publiziert, damit Home Assistant Historie korrekt führt.
 
-Wichtige ENV-Variablen (siehe `config/app.env.example`):
-- `MQTT_HOST`, `MQTT_PORT`, optional `MQTT_USERNAME`, `MQTT_PASSWORD`
-- `MQTT_NODE_ID`, `MQTT_BASE_TOPIC`
-- `MQTT_DEBOUNCE_MS` (Default 0ms = jeder Push)
+Hinweis: ENV-Werte werden beim ersten Start als Defaults in die Datenbank uebernommen.

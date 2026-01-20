@@ -1,8 +1,8 @@
 import asyncio
 import logging
-import os
 import random
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote
@@ -20,63 +20,50 @@ from app.quote_sources import (
     SOURCE_BITFINEX,
     SOURCE_LIGHTSTREAMER,
     SOURCE_TRADEGATE,
+    BitfinexSettings,
     BitfinexStream,
     QuoteRouter,
     TradegatePoller,
+    TradegateSettings,
     is_isin,
-    load_bitfinex_settings,
-    load_tradegate_settings,
     normalize_bitfinex_symbol,
     parse_source_priority,
 )
-from app.settings import get_bool, set_bool
+from app.settings import get_bool, get_float, get_int, get_setting, set_bool, set_setting
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("portfolio-valuator")
 
 
-# ----------------- Konfiguration (ENV) -----------------
+# ----------------- Konfiguration (Defaults) -----------------
 
-LS_WSS_URL = os.getenv("LS_WSS_URL", "wss://push.bnpparibas.com/lightstreamer")
-LS_SUBPROTOCOL = os.getenv("LS_SUBPROTOCOL", "TLCP-2.5.0.lightstreamer.com")
-
-LS_ADAPTER_SET = os.getenv("LS_ADAPTER_SET", "SmarthouseFeed")
-LS_DATA_ADAPTER = os.getenv("LS_DATA_ADAPTER", "MDS5")
-
-# "Browser-ähnlicher" Client ID (BNP/Lightstreamer kann hier lizenz-/client-typ-spezifisch sein)
-LS_CID = os.getenv(
-    "LS_CID",
-    "pcYgxn8m8 feOojyA1V661f3g2.pz482h95IL5h",
-)
-
-# Item-Namensschema (Default: X0000010800<ISIN>)
-LS_ITEM_TEMPLATE = os.getenv("LS_ITEM_TEMPLATE", "X0000010800{isin}")
-
-# Origin ist wichtig (Server kann Origin prüfen). Zum Deaktivieren: LS_ORIGIN=""
-LS_ORIGIN = os.getenv("LS_ORIGIN", "https://derivate.bnpparibas.com") or None
-
-LS_USER_AGENT = os.getenv(
-    "LS_USER_AGENT",
+DEFAULT_LS_WSS_URL = "wss://push.bnpparibas.com/lightstreamer"
+DEFAULT_LS_SUBPROTOCOL = "TLCP-2.5.0.lightstreamer.com"
+DEFAULT_LS_ADAPTER_SET = "SmarthouseFeed"
+DEFAULT_LS_DATA_ADAPTER = "MDS5"
+DEFAULT_LS_CID = "pcYgxn8m8 feOojyA1V661f3g2.pz482h95IL5h"
+DEFAULT_LS_ITEM_TEMPLATE = "X0000010800{isin}"
+DEFAULT_LS_ORIGIN = "https://derivate.bnpparibas.com"
+DEFAULT_LS_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+DEFAULT_LS_RECONNECT_MIN_S = 1.0
+DEFAULT_LS_RECONNECT_MAX_S = 30.0
+DEFAULT_LS_RECV_TIMEOUT_S = 35.0
+DEFAULT_LS_STALE_RESTART_S = 90.0
 
-# Reconnect / Stabilität
-LS_RECONNECT_MIN_S = float(os.getenv("LS_RECONNECT_MIN_S", "1.0"))
-LS_RECONNECT_MAX_S = float(os.getenv("LS_RECONNECT_MAX_S", "30.0"))
-# If we don't receive any WS message for this long, consider the stream stuck and reconnect.
-LS_RECV_TIMEOUT_S = float(os.getenv("LS_RECV_TIMEOUT_S", "35.0"))
-LS_STALE_RESTART_S = float(os.getenv("LS_STALE_RESTART_S", "90.0"))
+DEFAULT_TRADEGATE_URL_TEMPLATE = "https://www.tradegate.de/refresh.php?isin={isin}"
+DEFAULT_TRADEGATE_TIMEOUT_S = 5.0
+DEFAULT_TRADEGATE_POLL_S = 10.0
+DEFAULT_TRADEGATE_USER_AGENT = "portfolio-valuator/1.0"
 
-# Kursquellen-Prioritaet (links = hoechste Prioritaet)
-QUOTE_SOURCE_PRIORITY = parse_source_priority(os.getenv("QUOTE_SOURCE_PRIORITY"))
+DEFAULT_BITFINEX_WSS_URL = "wss://api-pub.bitfinex.com/ws/2"
+DEFAULT_BITFINEX_RECONNECT_MIN_S = 1.0
+DEFAULT_BITFINEX_RECONNECT_MAX_S = 30.0
+
+DEFAULT_QUOTE_SOURCE_PRIORITY = "lightstreamer,tradegate,bitfinex"
 _KNOWN_SOURCES = {SOURCE_LIGHTSTREAMER, SOURCE_TRADEGATE, SOURCE_BITFINEX}
-_UNKNOWN_SOURCES = [s for s in QUOTE_SOURCE_PRIORITY if s not in _KNOWN_SOURCES]
-if _UNKNOWN_SOURCES:
-    logger.warning("Unbekannte Kursquelle in QUOTE_SOURCE_PRIORITY: %s", ", ".join(_UNKNOWN_SOURCES))
-
-TRADEGATE_SETTINGS = load_tradegate_settings()
-BITFINEX_SETTINGS = load_bitfinex_settings()
 
 # Für Streaming + Bewertung nutzen wir das „volle“ Schema (wie aus dem Browser beobachtet),
 # damit auch andere Item-Typen (z.B. Indizes) sauber funktionieren.
@@ -93,6 +80,74 @@ SCHEMA_FIELDS: List[str] = [
     "theta",
     "currentleverage",
 ]
+
+
+@dataclass(frozen=True)
+class LightstreamerSettings:
+    wss_url: str
+    subprotocol: Optional[str]
+    adapter_set: str
+    data_adapter: str
+    cid: str
+    item_template: str
+    origin: Optional[str]
+    user_agent: str
+    reconnect_min_s: float
+    reconnect_max_s: float
+    recv_timeout_s: float
+    stale_restart_s: float
+
+
+def _get_setting_str(key: str, default: str) -> str:
+    try:
+        return (get_setting(_conn, key, default) or "").strip() or default
+    except Exception:
+        return default
+
+
+def load_ls_settings() -> LightstreamerSettings:
+    origin = _get_setting_str("ls_origin", DEFAULT_LS_ORIGIN)
+    subprotocol = _get_setting_str("ls_subprotocol", DEFAULT_LS_SUBPROTOCOL)
+    return LightstreamerSettings(
+        wss_url=_get_setting_str("ls_wss_url", DEFAULT_LS_WSS_URL),
+        subprotocol=subprotocol or None,
+        adapter_set=_get_setting_str("ls_adapter_set", DEFAULT_LS_ADAPTER_SET),
+        data_adapter=_get_setting_str("ls_data_adapter", DEFAULT_LS_DATA_ADAPTER),
+        cid=_get_setting_str("ls_cid", DEFAULT_LS_CID),
+        item_template=_get_setting_str("ls_item_template", DEFAULT_LS_ITEM_TEMPLATE),
+        origin=origin or None,
+        user_agent=_get_setting_str("ls_user_agent", DEFAULT_LS_USER_AGENT),
+        reconnect_min_s=get_float(_conn, "ls_reconnect_min_s", DEFAULT_LS_RECONNECT_MIN_S),
+        reconnect_max_s=get_float(_conn, "ls_reconnect_max_s", DEFAULT_LS_RECONNECT_MAX_S),
+        recv_timeout_s=get_float(_conn, "ls_recv_timeout_s", DEFAULT_LS_RECV_TIMEOUT_S),
+        stale_restart_s=get_float(_conn, "ls_stale_restart_s", DEFAULT_LS_STALE_RESTART_S),
+    )
+
+
+def load_tradegate_settings_db() -> TradegateSettings:
+    return TradegateSettings(
+        url_template=_get_setting_str("tradegate_url_template", DEFAULT_TRADEGATE_URL_TEMPLATE),
+        timeout_s=get_float(_conn, "tradegate_timeout_s", DEFAULT_TRADEGATE_TIMEOUT_S),
+        poll_s=get_float(_conn, "tradegate_poll_s", DEFAULT_TRADEGATE_POLL_S),
+        user_agent=_get_setting_str("tradegate_user_agent", DEFAULT_TRADEGATE_USER_AGENT),
+    )
+
+
+def load_bitfinex_settings_db() -> BitfinexSettings:
+    return BitfinexSettings(
+        wss_url=_get_setting_str("bitfinex_wss_url", DEFAULT_BITFINEX_WSS_URL),
+        reconnect_min_s=get_float(_conn, "bitfinex_reconnect_min_s", DEFAULT_BITFINEX_RECONNECT_MIN_S),
+        reconnect_max_s=get_float(_conn, "bitfinex_reconnect_max_s", DEFAULT_BITFINEX_RECONNECT_MAX_S),
+    )
+
+
+def load_source_priority() -> List[str]:
+    raw = _get_setting_str("quote_source_priority", DEFAULT_QUOTE_SOURCE_PRIORITY)
+    priorities = parse_source_priority(raw)
+    unknown = [s for s in priorities if s not in _KNOWN_SOURCES]
+    if unknown:
+        logger.warning("Unbekannte Kursquelle in quote_source_priority: %s", ", ".join(unknown))
+    return priorities
 
 
 def now_iso() -> str:
@@ -114,7 +169,7 @@ def is_ls_item(code: str) -> bool:
 
 def isin_to_item(isin: str) -> str:
     isin = validate_isin(isin)
-    tmpl = (LS_ITEM_TEMPLATE or "").strip() or "X0000010800{isin}"
+    tmpl = (load_ls_settings().item_template or "").strip() or "X0000010800{isin}"
     if "{isin}" not in tmpl:
         raise ValueError("LS_ITEM_TEMPLATE muss '{isin}' enthalten.")
     return tmpl.format(isin=isin)
@@ -167,15 +222,15 @@ def decode_field_values(tokens: List[str], fields: List[str], prev: Dict[str, Op
     return state
 
 
-async def _ws_connect() -> Any:
+async def _ws_connect(settings: LightstreamerSettings) -> Any:
     """
     Robust gegen Unterschiede im Server-Handshake:
     - ggf. ohne UA
     - ggf. ohne Subprotocol
     - permessage-deflate deaktiviert
     """
-    subprotocols: List[Optional[str]] = [LS_SUBPROTOCOL, None]
-    origins: List[Optional[str]] = [LS_ORIGIN, None]
+    subprotocols: List[Optional[str]] = [settings.subprotocol, None]
+    origins: List[Optional[str]] = [settings.origin, None]
 
     last_exc: Optional[BaseException] = None
 
@@ -193,11 +248,11 @@ async def _ws_connect() -> Any:
 
                 headers: Dict[str, str] = {}
                 if send_ua:
-                    headers["User-Agent"] = LS_USER_AGENT
+                    headers["User-Agent"] = settings.user_agent
 
                 try:
                     ws = await websockets.connect(
-                        LS_WSS_URL,
+                        settings.wss_url,
                         **kwargs,
                         additional_headers=headers or None,
                     )
@@ -207,7 +262,7 @@ async def _ws_connect() -> Any:
                     # Fallback für ältere websockets Signaturen
                     try:
                         ws = await websockets.connect(
-                            LS_WSS_URL,
+                            settings.wss_url,
                             **kwargs,
                             extra_headers=headers or None,
                         )
@@ -223,7 +278,8 @@ async def _ws_connect() -> Any:
 
 
 class LightstreamerSession:
-    def __init__(self) -> None:
+    def __init__(self, settings: LightstreamerSettings) -> None:
+        self.settings = settings
         self.websocket: Optional[Any] = None
         self.session_id: Optional[str] = None
         self.sub_id: int = 1
@@ -231,12 +287,12 @@ class LightstreamerSession:
         self.item_state: Dict[int, Dict[str, Optional[str]]] = {}
 
     async def connect(self) -> None:
-        self.websocket = await _ws_connect()
+        self.websocket = await _ws_connect(self.settings)
 
         params = (
-            f"LS_adapter_set={quote(LS_ADAPTER_SET)}"
+            f"LS_adapter_set={quote(self.settings.adapter_set)}"
             f"&LS_user="
-            f"&LS_cid={quote(LS_CID)}"
+            f"&LS_cid={quote(self.settings.cid)}"
             f"&LS_send_sync=false"
             f"&LS_cause=api"
             f"&LS_password="
@@ -271,7 +327,7 @@ class LightstreamerSession:
             f"&LS_mode=MERGE"
             f"&LS_group={group}"
             f"&LS_schema={schema}"
-            f"&LS_data_adapter={quote(LS_DATA_ADAPTER)}"
+            f"&LS_data_adapter={quote(self.settings.data_adapter)}"
             f"&LS_snapshot=true"
             f"&LS_ack=false"
             f"&LS_requested_max_frequency=unfiltered"
@@ -671,11 +727,11 @@ class StreamManager:
         self._dirty = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
-        self.quote_router = QuoteRouter(QUOTE_SOURCE_PRIORITY)
+        self.quote_router = QuoteRouter(load_source_priority())
         self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.default_priority
         self.tradegate_poller: Optional[TradegatePoller] = None
         self.bitfinex_stream: Optional[BitfinexStream] = BitfinexStream(
-            settings=BITFINEX_SETTINGS,
+            settings=load_bitfinex_settings_db(),
             router=self.quote_router,
             on_best_update=self._on_source_update,
         )
@@ -684,7 +740,7 @@ class StreamManager:
         self.debug_mappings_updated_at: Optional[str] = None
         if SOURCE_TRADEGATE in self.quote_router.default_priority:
             self.tradegate_poller = TradegatePoller(
-                settings=TRADEGATE_SETTINGS,
+                settings=load_tradegate_settings_db(),
                 router=self.quote_router,
                 on_best_update=self._on_source_update,
             )
@@ -701,6 +757,32 @@ class StreamManager:
             self.tradegate_poller.start()
         if self.bitfinex_stream:
             self.bitfinex_stream.start()
+
+    def reload_settings(self) -> None:
+        priorities = load_source_priority()
+        if hasattr(self.quote_router, "set_default_priority"):
+            self.quote_router.set_default_priority(priorities)
+        else:
+            self.quote_router.default_priority = priorities
+        self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in priorities
+
+        if SOURCE_TRADEGATE in priorities:
+            if not self.tradegate_poller:
+                self.tradegate_poller = TradegatePoller(
+                    settings=load_tradegate_settings_db(),
+                    router=self.quote_router,
+                    on_best_update=self._on_source_update,
+                )
+                self.tradegate_poller.start()
+            else:
+                self.tradegate_poller.settings = load_tradegate_settings_db()
+        else:
+            if self.tradegate_poller:
+                self.tradegate_poller.stop()
+                self.tradegate_poller = None
+
+        if self.bitfinex_stream:
+            self.bitfinex_stream.settings = load_bitfinex_settings_db()
 
     def mark_dirty(self) -> None:
         self._dirty.set()
@@ -805,10 +887,15 @@ class StreamManager:
         Restarts subscription when portfolios/positions change (dirty flag).
         """
         last_items: List[str] = []
-        backoff_s: float = max(0.1, LS_RECONNECT_MIN_S)
+        backoff_s: float = max(0.1, load_ls_settings().reconnect_min_s)
 
         while True:
             try:
+                ls_settings = load_ls_settings()
+                ls_reconnect_min_s = max(0.1, ls_settings.reconnect_min_s)
+                ls_reconnect_max_s = max(ls_reconnect_min_s, ls_settings.reconnect_max_s)
+                ls_recv_timeout_s = ls_settings.recv_timeout_s
+                ls_stale_restart_s = ls_settings.stale_restart_s
                 # Stream läuft, wenn entweder Dashboard-Clients verbunden sind ODER MQTT enabled ist.
                 # So kann MQTT auch ohne geöffnetes Frontend 24/7 Updates bekommen.
                 need_stream = bool(self.clients) or _mqtt_is_enabled()
@@ -927,13 +1014,13 @@ class StreamManager:
 
                 await self.broadcast({"type": "status", "level": "info", "message": f"Starte Stream für {len(items)} Item(s)…"})
 
-                sess = LightstreamerSession()
+                sess = LightstreamerSession(ls_settings)
                 try:
                     await sess.connect()
                     await sess.subscribe_items(items)
                 except Exception as e:
                     # Backoff + retry on connect/subscribe errors
-                    wait_s = min(max(LS_RECONNECT_MIN_S, backoff_s), LS_RECONNECT_MAX_S)
+                    wait_s = min(max(ls_reconnect_min_s, backoff_s), ls_reconnect_max_s)
                     jitter = random.uniform(0.0, max(0.1, wait_s * 0.1))
                     await self.broadcast(
                         {
@@ -947,12 +1034,12 @@ class StreamManager:
                     except Exception:
                         pass
                     await asyncio.sleep(wait_s + jitter)
-                    backoff_s = min(LS_RECONNECT_MAX_S, max(LS_RECONNECT_MIN_S, backoff_s * 2.0))
+                    backoff_s = min(ls_reconnect_max_s, max(ls_reconnect_min_s, backoff_s * 2.0))
                     # force reconnect even if items unchanged
                     last_items = []
                     continue
 
-                backoff_s = max(0.1, LS_RECONNECT_MIN_S)
+                backoff_s = max(0.1, ls_reconnect_min_s)
                 await self.broadcast({"type": "status", "level": "success", "message": "Stream verbunden."})
 
                 # Receive loop until dirty flag set -> restart (oder bis wir den Stream nicht mehr brauchen)
@@ -960,14 +1047,14 @@ class StreamManager:
                 last_any_msg = loop.time()
                 while not self._dirty.is_set() and (self.clients or _mqtt_is_enabled()):
                     try:
-                        raw = await asyncio.wait_for(sess._recv_text(), timeout=max(1.0, LS_RECV_TIMEOUT_S))
+                        raw = await asyncio.wait_for(sess._recv_text(), timeout=max(1.0, ls_recv_timeout_s))
                     except ConnectionClosed as e:
                         await self.broadcast({"type": "status", "level": "error", "message": f"Stream getrennt: {e.code} {e.reason}"})
                         break
                     except asyncio.TimeoutError:
                         # We expect regular PROBE frames; if we don't see anything for a while,
                         # restart the connection to avoid silently-stuck sessions.
-                        if (loop.time() - last_any_msg) >= max(LS_RECV_TIMEOUT_S, LS_STALE_RESTART_S):
+                        if (loop.time() - last_any_msg) >= max(ls_recv_timeout_s, ls_stale_restart_s):
                             await self.broadcast(
                                 {
                                     "type": "status",
@@ -1050,10 +1137,10 @@ class StreamManager:
                 # If we ended the session without a "dirty" restart request, force reconnect.
                 # (Otherwise we'd sit in the "items == last_items" short-circuit and never restart.)
                 if not self._dirty.is_set() and (self.clients or _mqtt_is_enabled()):
-                    wait_s = min(max(LS_RECONNECT_MIN_S, backoff_s), LS_RECONNECT_MAX_S)
+                    wait_s = min(max(ls_reconnect_min_s, backoff_s), ls_reconnect_max_s)
                     jitter = random.uniform(0.0, max(0.1, wait_s * 0.1))
                     await asyncio.sleep(wait_s + jitter)
-                    backoff_s = min(LS_RECONNECT_MAX_S, max(LS_RECONNECT_MIN_S, backoff_s * 2.0))
+                    backoff_s = min(ls_reconnect_max_s, max(ls_reconnect_min_s, backoff_s * 2.0))
                     last_items = []
 
             except asyncio.CancelledError:
@@ -1106,7 +1193,7 @@ def _mqtt_connect_if_enabled() -> None:
         return
     if _mqtt:
         return
-    s = load_mqtt_settings()
+    s = load_mqtt_settings(_conn)
     if not s.host:
         raise RuntimeError("MQTT_HOST ist nicht gesetzt.")
     _mqtt = HomeAssistantMqttPublisher(s)
@@ -1121,6 +1208,55 @@ def _mqtt_disconnect() -> None:
     _mqtt = None
 
 
+def _mqtt_settings_payload() -> Dict[str, Any]:
+    node_id = _get_setting_str("mqtt_node_id", "portfolio_valuator")
+    base_topic = _get_setting_str("mqtt_base_topic", f"portfolio_valuator/{node_id}")
+    return {
+        "host": _get_setting_str("mqtt_host", ""),
+        "port": get_int(_conn, "mqtt_port", 1883),
+        "username": _get_setting_str("mqtt_username", ""),
+        "password": _get_setting_str("mqtt_password", ""),
+        "client_id": _get_setting_str("mqtt_client_id", ""),
+        "discovery_prefix": _get_setting_str("mqtt_discovery_prefix", "homeassistant"),
+        "node_id": node_id,
+        "base_topic": base_topic,
+        "qos": get_int(_conn, "mqtt_qos", 0),
+        "retain": get_bool(_conn, "mqtt_retain", True),
+        "debounce_ms": get_int(_conn, "mqtt_debounce_ms", 0),
+        "sanity_skip_zero_price": get_bool(_conn, "mqtt_sanity_skip_zero_price", True),
+        "sanity_max_pct_change": get_float(_conn, "mqtt_sanity_max_pct_change", 0.0),
+        "sanity_require_price_for_valuation": get_bool(_conn, "mqtt_sanity_require_price_for_valuation", True),
+    }
+
+
+def _source_settings_payload() -> Dict[str, Any]:
+    ls = load_ls_settings()
+    tradegate = load_tradegate_settings_db()
+    bitfinex = load_bitfinex_settings_db()
+    return {
+        "quote_source_priority": _get_setting_str("quote_source_priority", DEFAULT_QUOTE_SOURCE_PRIORITY),
+        "ls_wss_url": ls.wss_url,
+        "ls_subprotocol": ls.subprotocol or "",
+        "ls_adapter_set": ls.adapter_set,
+        "ls_data_adapter": ls.data_adapter,
+        "ls_cid": ls.cid,
+        "ls_item_template": ls.item_template,
+        "ls_origin": ls.origin or "",
+        "ls_user_agent": ls.user_agent,
+        "ls_reconnect_min_s": ls.reconnect_min_s,
+        "ls_reconnect_max_s": ls.reconnect_max_s,
+        "ls_recv_timeout_s": ls.recv_timeout_s,
+        "ls_stale_restart_s": ls.stale_restart_s,
+        "tradegate_url_template": tradegate.url_template,
+        "tradegate_timeout_s": tradegate.timeout_s,
+        "tradegate_poll_s": tradegate.poll_s,
+        "tradegate_user_agent": tradegate.user_agent,
+        "bitfinex_wss_url": bitfinex.wss_url,
+        "bitfinex_reconnect_min_s": bitfinex.reconnect_min_s,
+        "bitfinex_reconnect_max_s": bitfinex.reconnect_max_s,
+    }
+
+
 async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Optional[float]]:
     """
     Holt für eine ISIN-Liste die aktuellen Bid-Quotes (Snapshot/erste Updates) über Lightstreamer.
@@ -1130,7 +1266,7 @@ async def fetch_bids(isins: List[str], timeout_s: float = 8.0) -> Dict[str, Opti
     items = [isin_to_item(i) for i in clean_isins]
     idx_to_isin = {idx + 1: isin for idx, isin in enumerate(clean_isins)}
 
-    sess = LightstreamerSession()
+    sess = LightstreamerSession(load_ls_settings())
     bids: Dict[str, Optional[float]] = {i: None for i in clean_isins}
 
     try:
@@ -1349,6 +1485,46 @@ class SourceUpdate(BaseModel):
 
 class OrderUpdate(BaseModel):
     ids: List[int] = Field(default_factory=list)
+
+
+class MqttSettingsUpdate(BaseModel):
+    host: Optional[str] = None
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    username: Optional[str] = None
+    password: Optional[str] = None
+    client_id: Optional[str] = None
+    discovery_prefix: Optional[str] = None
+    node_id: Optional[str] = None
+    base_topic: Optional[str] = None
+    qos: Optional[int] = Field(default=None, ge=0, le=2)
+    retain: Optional[bool] = None
+    debounce_ms: Optional[int] = Field(default=None, ge=0)
+    sanity_skip_zero_price: Optional[bool] = None
+    sanity_max_pct_change: Optional[float] = Field(default=None, ge=0)
+    sanity_require_price_for_valuation: Optional[bool] = None
+
+
+class SourceSettingsUpdate(BaseModel):
+    quote_source_priority: Optional[str] = None
+    ls_wss_url: Optional[str] = None
+    ls_subprotocol: Optional[str] = None
+    ls_adapter_set: Optional[str] = None
+    ls_data_adapter: Optional[str] = None
+    ls_cid: Optional[str] = None
+    ls_item_template: Optional[str] = None
+    ls_origin: Optional[str] = None
+    ls_user_agent: Optional[str] = None
+    ls_reconnect_min_s: Optional[float] = Field(default=None, ge=0)
+    ls_reconnect_max_s: Optional[float] = Field(default=None, ge=0)
+    ls_recv_timeout_s: Optional[float] = Field(default=None, ge=0)
+    ls_stale_restart_s: Optional[float] = Field(default=None, ge=0)
+    tradegate_url_template: Optional[str] = None
+    tradegate_timeout_s: Optional[float] = Field(default=None, ge=0)
+    tradegate_poll_s: Optional[float] = Field(default=None, ge=0)
+    tradegate_user_agent: Optional[str] = None
+    bitfinex_wss_url: Optional[str] = None
+    bitfinex_reconnect_min_s: Optional[float] = Field(default=None, ge=0)
+    bitfinex_reconnect_max_s: Optional[float] = Field(default=None, ge=0)
 
 
 class PositionIn(BaseModel):
@@ -2444,7 +2620,7 @@ async def ws_dashboard(ws: WebSocket):
 
 @app.get("/api/mqtt")
 async def mqtt_status() -> Dict[str, Any]:
-    s = load_mqtt_settings()
+    s = load_mqtt_settings(_conn)
     enabled = _mqtt_is_enabled()
     return {
         "enabled": enabled,
@@ -2453,6 +2629,116 @@ async def mqtt_status() -> Dict[str, Any]:
         "port": s.port,
         "availability_topic": s.availability_topic,
     }
+
+
+@app.get("/api/settings/mqtt")
+async def get_mqtt_settings() -> Dict[str, Any]:
+    return _mqtt_settings_payload()
+
+
+@app.put("/api/settings/mqtt")
+async def update_mqtt_settings(body: MqttSettingsUpdate) -> Dict[str, Any]:
+    if body.host is not None:
+        set_setting(_conn, "mqtt_host", (body.host or "").strip())
+    if body.port is not None:
+        set_setting(_conn, "mqtt_port", str(body.port))
+    if body.username is not None:
+        set_setting(_conn, "mqtt_username", (body.username or "").strip())
+    if body.password is not None:
+        set_setting(_conn, "mqtt_password", (body.password or "").strip())
+    if body.client_id is not None:
+        set_setting(_conn, "mqtt_client_id", (body.client_id or "").strip())
+    if body.discovery_prefix is not None:
+        set_setting(_conn, "mqtt_discovery_prefix", (body.discovery_prefix or "").strip())
+    if body.node_id is not None:
+        set_setting(_conn, "mqtt_node_id", (body.node_id or "").strip())
+    if body.base_topic is not None:
+        set_setting(_conn, "mqtt_base_topic", (body.base_topic or "").strip())
+    if body.qos is not None:
+        set_setting(_conn, "mqtt_qos", str(body.qos))
+    if body.retain is not None:
+        set_setting(_conn, "mqtt_retain", "true" if body.retain else "false")
+    if body.debounce_ms is not None:
+        set_setting(_conn, "mqtt_debounce_ms", str(body.debounce_ms))
+    if body.sanity_skip_zero_price is not None:
+        set_setting(_conn, "mqtt_sanity_skip_zero_price", "true" if body.sanity_skip_zero_price else "false")
+    if body.sanity_max_pct_change is not None:
+        set_setting(_conn, "mqtt_sanity_max_pct_change", str(body.sanity_max_pct_change))
+    if body.sanity_require_price_for_valuation is not None:
+        set_setting(
+            _conn,
+            "mqtt_sanity_require_price_for_valuation",
+            "true" if body.sanity_require_price_for_valuation else "false",
+        )
+
+    if _mqtt_is_enabled():
+        _mqtt_disconnect()
+        try:
+            _mqtt_connect_if_enabled()
+        except Exception as exc:
+            logger.warning("MQTT reconnect fehlgeschlagen: %s", exc)
+    return _mqtt_settings_payload()
+
+
+@app.get("/api/settings/sources")
+async def get_source_settings() -> Dict[str, Any]:
+    return _source_settings_payload()
+
+
+@app.put("/api/settings/sources")
+async def update_source_settings(body: SourceSettingsUpdate) -> Dict[str, Any]:
+    if body.quote_source_priority is not None:
+        raw = (body.quote_source_priority or "").strip()
+        raw = raw or DEFAULT_QUOTE_SOURCE_PRIORITY
+        parsed = parse_source_priority(raw)
+        set_setting(_conn, "quote_source_priority", ",".join(parsed))
+    if body.ls_wss_url is not None:
+        set_setting(_conn, "ls_wss_url", (body.ls_wss_url or "").strip())
+    if body.ls_subprotocol is not None:
+        set_setting(_conn, "ls_subprotocol", (body.ls_subprotocol or "").strip())
+    if body.ls_adapter_set is not None:
+        set_setting(_conn, "ls_adapter_set", (body.ls_adapter_set or "").strip())
+    if body.ls_data_adapter is not None:
+        set_setting(_conn, "ls_data_adapter", (body.ls_data_adapter or "").strip())
+    if body.ls_cid is not None:
+        set_setting(_conn, "ls_cid", (body.ls_cid or "").strip())
+    if body.ls_item_template is not None:
+        value = (body.ls_item_template or "").strip()
+        if value and "{isin}" not in value:
+            raise HTTPException(status_code=400, detail="LS Item Template muss '{isin}' enthalten")
+        set_setting(_conn, "ls_item_template", value)
+    if body.ls_origin is not None:
+        set_setting(_conn, "ls_origin", (body.ls_origin or "").strip())
+    if body.ls_user_agent is not None:
+        set_setting(_conn, "ls_user_agent", (body.ls_user_agent or "").strip())
+    if body.ls_reconnect_min_s is not None:
+        set_setting(_conn, "ls_reconnect_min_s", str(body.ls_reconnect_min_s))
+    if body.ls_reconnect_max_s is not None:
+        set_setting(_conn, "ls_reconnect_max_s", str(body.ls_reconnect_max_s))
+    if body.ls_recv_timeout_s is not None:
+        set_setting(_conn, "ls_recv_timeout_s", str(body.ls_recv_timeout_s))
+    if body.ls_stale_restart_s is not None:
+        set_setting(_conn, "ls_stale_restart_s", str(body.ls_stale_restart_s))
+
+    if body.tradegate_url_template is not None:
+        set_setting(_conn, "tradegate_url_template", (body.tradegate_url_template or "").strip())
+    if body.tradegate_timeout_s is not None:
+        set_setting(_conn, "tradegate_timeout_s", str(body.tradegate_timeout_s))
+    if body.tradegate_poll_s is not None:
+        set_setting(_conn, "tradegate_poll_s", str(body.tradegate_poll_s))
+    if body.tradegate_user_agent is not None:
+        set_setting(_conn, "tradegate_user_agent", (body.tradegate_user_agent or "").strip())
+
+    if body.bitfinex_wss_url is not None:
+        set_setting(_conn, "bitfinex_wss_url", (body.bitfinex_wss_url or "").strip())
+    if body.bitfinex_reconnect_min_s is not None:
+        set_setting(_conn, "bitfinex_reconnect_min_s", str(body.bitfinex_reconnect_min_s))
+    if body.bitfinex_reconnect_max_s is not None:
+        set_setting(_conn, "bitfinex_reconnect_max_s", str(body.bitfinex_reconnect_max_s))
+
+    stream_manager.reload_settings()
+    stream_manager.mark_dirty()
+    return _source_settings_payload()
 
 
 @app.put("/api/mqtt/enabled")
