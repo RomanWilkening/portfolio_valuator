@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Positionen</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #1b1f24;
+      --muted: #6b7280;
+      --line: #e6e9f0;
+      --accent: #2d6cdf;
+      --accent-soft: #eef3ff;
+      --nav-bg: #0f172a;
+      --nav-text: #e2e8f0;
+      --nav-muted: #94a3b8;
+      --nav-hover: #1e293b;
+      --nav-active: #1d4ed8;
+      --nav-width: 240px;
+      --nav-collapsed: 72px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: var(--nav-width);
+      background: var(--nav-bg);
+      color: var(--nav-text);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 18px 14px;
+      transition: width 0.2s ease;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--nav-active);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+    .brand-title { font-weight: 600; letter-spacing: 0.02em; }
+    .nav-toggle {
+      margin-left: auto;
+      border: 1px solid #334155;
+      background: transparent;
+      color: var(--nav-text);
+      border-radius: 8px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .nav { display: flex; flex-direction: column; gap: 6px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      color: var(--nav-text);
+      text-decoration: none;
+    }
+    .nav-item:hover { background: var(--nav-hover); }
+    .nav-item.active {
+      background: #1f2a44;
+      border: 1px solid #334155;
+    }
+    .nav-icon { width: 22px; text-align: center; font-weight: 600; }
+    .nav-text { white-space: nowrap; }
+    .nav-footer { margin-top: auto; font-size: 12px; color: var(--nav-muted); }
+    .main { flex: 1; min-width: 0; }
+    .container { max-width: 1240px; margin: 0 auto; padding: 24px 32px 32px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 28px; }
+    h2 { margin: 0 0 6px 0; font-size: 20px; }
+    .sub { color: var(--muted); font-size: 14px; }
+    .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .button {
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .button.ghost {
+      background: transparent;
+      color: var(--accent);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .grid {
+      display: grid;
+      gap: 16px;
+      margin-top: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    }
+    .span-2 { grid-column: span 2; }
+    .status {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+    .status.info { background: #eef3ff; color: #23448b; }
+    .status.success { background: #e7f7ea; color: #1f6f3a; }
+    .status.warn { background: #fff2dc; color: #8a5a17; }
+    .status.error { background: #ffe7ea; color: #8f1d2f; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    input, select {
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font-size: 14px;
+    }
+    .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .muted { color: var(--muted); }
+    body.nav-collapsed .sidebar { width: var(--nav-collapsed); }
+    body.nav-collapsed .nav-text,
+    body.nav-collapsed .brand-title,
+    body.nav-collapsed .nav-footer { display: none; }
+    @media (max-width: 900px) {
+      .app { flex-direction: column; }
+      .sidebar { width: 100%; flex-direction: row; align-items: center; }
+      body.nav-collapsed .sidebar { width: 100%; }
+      .nav { flex-direction: row; flex-wrap: wrap; }
+      .nav-footer { display: none; }
+      header { align-items: flex-start; }
+      .actions { width: 100%; justify-content: flex-start; }
+      .span-2 { grid-column: span 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sideNav">
+      <div class="brand">
+        <div class="logo">PV</div>
+        <div class="brand-title">Portfolio</div>
+        <button id="navToggle" class="nav-toggle" aria-label="Menue umschalten">≡</button>
+      </div>
+      <nav class="nav">
+        <a class="nav-item" href="/" title="Uebersicht"><span class="nav-icon">U</span><span class="nav-text">Uebersicht</span></a>
+        <a class="nav-item" href="/instruments" title="Instrumente"><span class="nav-icon">I</span><span class="nav-text">Instrumente</span></a>
+        <a class="nav-item" href="/sources" title="Kursquellen"><span class="nav-icon">K</span><span class="nav-text">Kursquellen</span></a>
+        <a class="nav-item" href="/watchlist" title="Watchlist"><span class="nav-icon">W</span><span class="nav-text">Watchlist</span></a>
+        <a class="nav-item active" href="/positions" title="Positionen"><span class="nav-icon">P</span><span class="nav-text">Positionen</span></a>
+      </nav>
+      <div class="nav-footer">Portfolios & Positionen</div>
+    </aside>
+    <main class="main">
+      <div class="container">
+        <header>
+          <div>
+            <div class="sub">Verwaltung</div>
+            <h1>Positionen</h1>
+            <div class="sub">Portfolios und Positionen direkt bearbeiten</div>
+          </div>
+        </header>
+
+        <div id="status" class="status info">Lade...</div>
+
+        <div class="grid">
+          <section class="card">
+            <h2>Portfolios</h2>
+            <div class="sub">Namen und Waehrungen direkt editieren</div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Waehrung</th>
+                    <th class="num">Positionen</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="portfoliosTbody"></tbody>
+              </table>
+            </div>
+            <div class="inline-form" style="margin-top: 12px;">
+              <input id="newPortfolioName" placeholder="Neues Portfolio" />
+              <select id="newPortfolioCurrency">
+                <option value="EUR">EUR</option>
+                <option value="USD">USD</option>
+                <option value="CHF">CHF</option>
+                <option value="GBP">GBP</option>
+              </select>
+              <button id="createPortfolioBtn" class="button">Anlegen</button>
+            </div>
+            <div class="inline-form" style="margin-top: 12px;">
+              <label class="muted">Aktives Portfolio</label>
+              <select id="activePortfolioSelect"></select>
+            </div>
+          </section>
+
+          <section class="card span-2">
+            <div class="inline-form" style="justify-content: space-between; align-items: flex-end;">
+              <div>
+                <h2>Positionen</h2>
+                <div class="sub">Instrumente einem Portfolio zuordnen (Auto-Save)</div>
+              </div>
+              <span class="pill">speichert automatisch</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Instrument</th>
+                    <th>Positionsname</th>
+                    <th class="num">Menge</th>
+                    <th class="num">Entry</th>
+                    <th>Waehrung</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="positionsTbody"></tbody>
+              </table>
+            </div>
+            <div class="inline-form" style="margin-top: 12px;">
+              <select id="newPositionInstrument"></select>
+              <input id="newPositionName" placeholder="Positionsname (optional)" />
+              <input id="newPositionQty" type="number" step="any" min="0" placeholder="Menge" />
+              <input id="newPositionEntry" type="number" step="any" min="0" placeholder="Entry" />
+              <select id="newPositionCurrency">
+                <option value="EUR">EUR</option>
+                <option value="USD">USD</option>
+                <option value="CHF">CHF</option>
+                <option value="GBP">GBP</option>
+              </select>
+              <button id="addPositionBtn" class="button">Hinzufuegen</button>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>MQTT (Home Assistant)</h2>
+            <div class="sub">Verbindungsdaten aus config/app.env</div>
+            <div class="inline-form" style="margin-top: 12px;">
+              <span class="pill">Status: <strong id="mqttStatus">—</strong></span>
+              <button id="mqttToggleBtn" class="button">MQTT einschalten</button>
+              <button id="mqttReloadBtn" class="button ghost">Neu laden</button>
+            </div>
+            <div class="sub" style="margin-top: 10px;">
+              Availability Topic: <code id="mqttAvailability">—</code>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const navToggle = document.getElementById("navToggle");
+    const storedNav = localStorage.getItem("pv_nav_collapsed");
+    if (storedNav === "1") document.body.classList.add("nav-collapsed");
+    if (navToggle) {
+      navToggle.onclick = () => {
+        document.body.classList.toggle("nav-collapsed");
+        localStorage.setItem(
+          "pv_nav_collapsed",
+          document.body.classList.contains("nav-collapsed") ? "1" : "0"
+        );
+      };
+    }
+
+    const portfoliosTbody = document.getElementById("portfoliosTbody");
+    const newPortfolioName = document.getElementById("newPortfolioName");
+    const newPortfolioCurrency = document.getElementById("newPortfolioCurrency");
+    const createPortfolioBtn = document.getElementById("createPortfolioBtn");
+    const activePortfolioSelect = document.getElementById("activePortfolioSelect");
+
+    const positionsTbody = document.getElementById("positionsTbody");
+    const newPositionInstrument = document.getElementById("newPositionInstrument");
+    const newPositionName = document.getElementById("newPositionName");
+    const newPositionQty = document.getElementById("newPositionQty");
+    const newPositionEntry = document.getElementById("newPositionEntry");
+    const newPositionCurrency = document.getElementById("newPositionCurrency");
+    const addPositionBtn = document.getElementById("addPositionBtn");
+
+    const mqttStatusEl = document.getElementById("mqttStatus");
+    const mqttToggleBtn = document.getElementById("mqttToggleBtn");
+    const mqttReloadBtn = document.getElementById("mqttReloadBtn");
+    const mqttAvailabilityEl = document.getElementById("mqttAvailability");
+
+    const state = {
+      instruments: [],
+      portfolios: [],
+      positions: [],
+      activePortfolioId: null,
+    };
+
+    let saveTimer = null;
+    let saving = false;
+    let savePending = false;
+
+    function setStatus(level, message) {
+      statusEl.className = "status " + level;
+      statusEl.textContent = message;
+    }
+
+    async function api(path, options={}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) return await res.json();
+      return await res.text();
+    }
+
+    function renderInstrumentSelect(select, instruments, selectedId) {
+      select.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Instrument waehlen";
+      select.appendChild(placeholder);
+      for (const inst of instruments) {
+        const opt = document.createElement("option");
+        opt.value = String(inst.id);
+        const name = inst.name || inst.code || ("#" + inst.id);
+        opt.textContent = `${name} (${inst.code || "-"})`;
+        select.appendChild(opt);
+      }
+      if (selectedId) select.value = String(selectedId);
+    }
+
+    function renderPortfolios() {
+      portfoliosTbody.innerHTML = "";
+      activePortfolioSelect.innerHTML = "";
+      for (const pf of state.portfolios) {
+        const tr = document.createElement("tr");
+        const tdName = document.createElement("td");
+        const tdCurr = document.createElement("td");
+        const tdCount = document.createElement("td");
+        const tdActions = document.createElement("td");
+        tdCount.className = "num";
+
+        const nameInput = document.createElement("input");
+        nameInput.value = pf.name || "";
+        nameInput.onchange = async () => {
+          const payload = { name: nameInput.value.trim(), currency: pf.currency };
+          setStatus("info", "Speichere Portfolio...");
+          await api(`/api/portfolios/${pf.id}`, { method: "PUT", body: JSON.stringify(payload) });
+          await loadPortfolios();
+          setStatus("success", "Portfolio gespeichert.");
+        };
+
+        const currSelect = document.createElement("select");
+        ["EUR", "USD", "CHF", "GBP"].forEach(c => {
+          const opt = document.createElement("option");
+          opt.value = c;
+          opt.textContent = c;
+          currSelect.appendChild(opt);
+        });
+        currSelect.value = (pf.currency || "EUR").toUpperCase();
+        currSelect.onchange = async () => {
+          const payload = { name: pf.name, currency: currSelect.value };
+          setStatus("info", "Speichere Portfolio...");
+          await api(`/api/portfolios/${pf.id}`, { method: "PUT", body: JSON.stringify(payload) });
+          await loadPortfolios();
+          setStatus("success", "Portfolio gespeichert.");
+        };
+
+        tdCount.textContent = String(pf.position_count || 0);
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Loeschen";
+        delBtn.onclick = async () => {
+          if (!confirm(`Portfolio loeschen?\\n\\n${pf.name} (#${pf.id})`)) return;
+          setStatus("info", "Loesche Portfolio...");
+          await api(`/api/portfolios/${pf.id}`, { method: "DELETE" });
+          await loadPortfolios();
+          if (state.activePortfolioId === pf.id) {
+            state.activePortfolioId = state.portfolios[0]?.id || null;
+            if (state.activePortfolioId) await loadPortfolio(state.activePortfolioId);
+          }
+          setStatus("success", "Portfolio geloescht.");
+        };
+
+        tdName.appendChild(nameInput);
+        tdCurr.appendChild(currSelect);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdName);
+        tr.appendChild(tdCurr);
+        tr.appendChild(tdCount);
+        tr.appendChild(tdActions);
+        portfoliosTbody.appendChild(tr);
+
+        const opt = document.createElement("option");
+        opt.value = String(pf.id);
+        opt.textContent = `${pf.name} (#${pf.id})`;
+        activePortfolioSelect.appendChild(opt);
+      }
+      if (!state.activePortfolioId && state.portfolios.length) {
+        state.activePortfolioId = state.portfolios[0].id;
+      }
+      if (state.activePortfolioId) activePortfolioSelect.value = String(state.activePortfolioId);
+    }
+
+    function renderPositions() {
+      positionsTbody.innerHTML = "";
+      for (const pos of state.positions) {
+        const tr = document.createElement("tr");
+        tr.dataset.id = pos.id ? String(pos.id) : "";
+        const tdInst = document.createElement("td");
+        const tdName = document.createElement("td");
+        const tdQty = document.createElement("td");
+        const tdEntry = document.createElement("td");
+        const tdCurr = document.createElement("td");
+        const tdActions = document.createElement("td");
+        tdQty.className = "num";
+        tdEntry.className = "num";
+
+        const instSelect = document.createElement("select");
+        renderInstrumentSelect(instSelect, state.instruments, pos.instrument_id);
+        instSelect.onchange = () => {
+          pos.instrument_id = Number(instSelect.value);
+          scheduleSavePositions();
+        };
+
+        const nameInput = document.createElement("input");
+        nameInput.value = pos.position_name || pos.name || "";
+        nameInput.onchange = () => {
+          pos.name = nameInput.value.trim();
+          scheduleSavePositions();
+        };
+
+        const qtyInput = document.createElement("input");
+        qtyInput.type = "number";
+        qtyInput.step = "any";
+        qtyInput.min = "0";
+        qtyInput.value = String(pos.quantity || "");
+        qtyInput.onchange = () => {
+          pos.quantity = Number(qtyInput.value);
+          scheduleSavePositions();
+        };
+
+        const entryInput = document.createElement("input");
+        entryInput.type = "number";
+        entryInput.step = "any";
+        entryInput.min = "0";
+        entryInput.value = String(pos.entry_price || "");
+        entryInput.onchange = () => {
+          pos.entry_price = Number(entryInput.value);
+          scheduleSavePositions();
+        };
+
+        const currSelect = document.createElement("select");
+        ["EUR", "USD", "CHF", "GBP"].forEach(c => {
+          const opt = document.createElement("option");
+          opt.value = c;
+          opt.textContent = c;
+          currSelect.appendChild(opt);
+        });
+        currSelect.value = (pos.position_currency || pos.currency || "EUR").toUpperCase();
+        currSelect.onchange = () => {
+          pos.currency = currSelect.value;
+          scheduleSavePositions();
+        };
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "button ghost";
+        delBtn.textContent = "Entfernen";
+        delBtn.onclick = () => {
+          state.positions = state.positions.filter(p => p !== pos);
+          renderPositions();
+          scheduleSavePositions();
+        };
+
+        tdInst.appendChild(instSelect);
+        tdName.appendChild(nameInput);
+        tdQty.appendChild(qtyInput);
+        tdEntry.appendChild(entryInput);
+        tdCurr.appendChild(currSelect);
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdInst);
+        tr.appendChild(tdName);
+        tr.appendChild(tdQty);
+        tr.appendChild(tdEntry);
+        tr.appendChild(tdCurr);
+        tr.appendChild(tdActions);
+        positionsTbody.appendChild(tr);
+      }
+    }
+
+    async function loadInstruments() {
+      state.instruments = await api("/api/instruments");
+      renderInstrumentSelect(newPositionInstrument, state.instruments);
+      renderPositions();
+    }
+
+    async function loadPortfolios() {
+      state.portfolios = await api("/api/portfolios");
+      if (!state.portfolios.length) {
+        state.activePortfolioId = null;
+        state.positions = [];
+      }
+      renderPortfolios();
+      if (state.activePortfolioId) await loadPortfolio(state.activePortfolioId);
+    }
+
+    async function loadPortfolio(id) {
+      if (!id) return;
+      const data = await api(`/api/portfolios/${id}`);
+      state.activePortfolioId = data.portfolio.id;
+      state.positions = data.positions || [];
+      renderPortfolios();
+      renderPositions();
+      const pf = data.portfolio;
+      setStatus("success", `Portfolio geladen: ${pf.name} (#${pf.id})`);
+    }
+
+    async function createPortfolio() {
+      const name = newPortfolioName.value.trim();
+      if (!name) return;
+      const currency = newPortfolioCurrency.value;
+      setStatus("info", "Lege Portfolio an...");
+      await api("/api/portfolios", { method: "POST", body: JSON.stringify({ name, currency }) });
+      newPortfolioName.value = "";
+      await loadPortfolios();
+      setStatus("success", "Portfolio angelegt.");
+    }
+
+    function scheduleSavePositions() {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        savePositions().catch(e => setStatus("error", String(e.message || e)));
+      }, 700);
+    }
+
+    async function savePositions() {
+      if (!state.activePortfolioId) return;
+      if (saving) {
+        savePending = true;
+        return;
+      }
+      const payload = state.positions.map(p => ({
+        instrument_id: Number(p.instrument_id),
+        name: (p.name || p.position_name || "").trim() || null,
+        quantity: Number(p.quantity),
+        entry_price: Number(p.entry_price),
+        currency: p.currency || p.position_currency || "EUR",
+      }));
+      for (const p of payload) {
+        if (!p.instrument_id || !isFinite(p.quantity) || p.quantity <= 0 || !isFinite(p.entry_price) || p.entry_price <= 0) {
+          setStatus("error", "Bitte gueltige Instrumente, Menge und Entry angeben.");
+          return;
+        }
+      }
+      saving = true;
+      setStatus("info", "Speichere Positionen...");
+      try {
+        await api(`/api/portfolios/${state.activePortfolioId}/positions`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        await loadPortfolio(state.activePortfolioId);
+        setStatus("success", "Positionen gespeichert.");
+      } finally {
+        saving = false;
+        if (savePending) {
+          savePending = false;
+          scheduleSavePositions();
+        }
+      }
+    }
+
+    async function addPosition() {
+      const instrumentId = Number(newPositionInstrument.value);
+      if (!instrumentId) {
+        setStatus("warn", "Bitte Instrument waehlen.");
+        return;
+      }
+      const qty = Number(newPositionQty.value);
+      const entry = Number(newPositionEntry.value);
+      if (!isFinite(qty) || qty <= 0 || !isFinite(entry) || entry <= 0) {
+        setStatus("error", "Bitte Menge und Entry > 0 angeben.");
+        return;
+      }
+      state.positions.push({
+        instrument_id: instrumentId,
+        name: newPositionName.value.trim() || null,
+        quantity: qty,
+        entry_price: entry,
+        currency: newPositionCurrency.value,
+      });
+      newPositionName.value = "";
+      newPositionQty.value = "";
+      newPositionEntry.value = "";
+      renderPositions();
+      scheduleSavePositions();
+    }
+
+    async function loadMqttStatus() {
+      const s = await api("/api/mqtt");
+      const enabled = !!s.enabled;
+      const connected = !!s.connected;
+      const host = s.host || "";
+      mqttStatusEl.textContent = enabled
+        ? (connected ? `an (verbunden: ${host})` : `an (nicht verbunden: ${host || "MQTT_HOST fehlt"})`)
+        : "aus";
+      mqttToggleBtn.textContent = enabled ? "MQTT ausschalten" : "MQTT einschalten";
+      mqttAvailabilityEl.textContent = s.availability_topic || "—";
+      return s;
+    }
+
+    async function toggleMqtt() {
+      const s = await api("/api/mqtt");
+      const next = !s.enabled;
+      setStatus("info", next ? "Schalte MQTT ein..." : "Schalte MQTT aus...");
+      await api("/api/mqtt/enabled", { method: "PUT", body: JSON.stringify({ enabled: next }) });
+      await loadMqttStatus();
+      setStatus("success", next ? "MQTT ist an." : "MQTT ist aus.");
+    }
+
+    createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
+    activePortfolioSelect.onchange = () => loadPortfolio(Number(activePortfolioSelect.value)).catch(e => setStatus("error", String(e.message || e)));
+    addPositionBtn.onclick = () => addPosition().catch(e => setStatus("error", String(e.message || e)));
+    mqttReloadBtn.onclick = () => loadMqttStatus().catch(e => setStatus("error", String(e.message || e)));
+    mqttToggleBtn.onclick = () => toggleMqtt().catch(e => setStatus("error", String(e.message || e)));
+    newPositionInstrument.onchange = () => {
+      const inst = state.instruments.find(i => String(i.id) === String(newPositionInstrument.value));
+      if (inst && inst.currency) newPositionCurrency.value = inst.currency;
+    };
+
+    Promise.all([loadInstruments(), loadPortfolios(), loadMqttStatus()])
+      .then(() => setStatus("success", "Bereit."))
+      .catch(e => setStatus("error", String(e.message || e)));
+  </script>
+</body>
+</html>

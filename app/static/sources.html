@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kursquellen</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #1b1f24;
+      --muted: #6b7280;
+      --line: #e6e9f0;
+      --accent: #2d6cdf;
+      --accent-soft: #eef3ff;
+      --nav-bg: #0f172a;
+      --nav-text: #e2e8f0;
+      --nav-muted: #94a3b8;
+      --nav-hover: #1e293b;
+      --nav-active: #1d4ed8;
+      --nav-width: 240px;
+      --nav-collapsed: 72px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: var(--nav-width);
+      background: var(--nav-bg);
+      color: var(--nav-text);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 18px 14px;
+      transition: width 0.2s ease;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--nav-active);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+    .brand-title { font-weight: 600; letter-spacing: 0.02em; }
+    .nav-toggle {
+      margin-left: auto;
+      border: 1px solid #334155;
+      background: transparent;
+      color: var(--nav-text);
+      border-radius: 8px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .nav { display: flex; flex-direction: column; gap: 6px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      color: var(--nav-text);
+      text-decoration: none;
+    }
+    .nav-item:hover { background: var(--nav-hover); }
+    .nav-item.active {
+      background: #1f2a44;
+      border: 1px solid #334155;
+    }
+    .nav-icon { width: 22px; text-align: center; font-weight: 600; }
+    .nav-text { white-space: nowrap; }
+    .nav-footer { margin-top: auto; font-size: 12px; color: var(--nav-muted); }
+    .main { flex: 1; min-width: 0; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px 32px 32px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 28px; }
+    h2 { margin: 0 0 6px 0; font-size: 20px; }
+    .sub { color: var(--muted); font-size: 14px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .status {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+    .status.info { background: #eef3ff; color: #23448b; }
+    .status.success { background: #e7f7ea; color: #1f6f3a; }
+    .status.warn { background: #fff2dc; color: #8a5a17; }
+    .status.error { background: #ffe7ea; color: #8f1d2f; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    body.nav-collapsed .sidebar { width: var(--nav-collapsed); }
+    body.nav-collapsed .nav-text,
+    body.nav-collapsed .brand-title,
+    body.nav-collapsed .nav-footer { display: none; }
+    @media (max-width: 900px) {
+      .app { flex-direction: column; }
+      .sidebar { width: 100%; flex-direction: row; align-items: center; }
+      body.nav-collapsed .sidebar { width: 100%; }
+      .nav { flex-direction: row; flex-wrap: wrap; }
+      .nav-footer { display: none; }
+      header { align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sideNav">
+      <div class="brand">
+        <div class="logo">PV</div>
+        <div class="brand-title">Portfolio</div>
+        <button id="navToggle" class="nav-toggle" aria-label="Menue umschalten">≡</button>
+      </div>
+      <nav class="nav">
+        <a class="nav-item" href="/" title="Uebersicht"><span class="nav-icon">U</span><span class="nav-text">Uebersicht</span></a>
+        <a class="nav-item" href="/instruments" title="Instrumente"><span class="nav-icon">I</span><span class="nav-text">Instrumente</span></a>
+        <a class="nav-item active" href="/sources" title="Kursquellen"><span class="nav-icon">K</span><span class="nav-text">Kursquellen</span></a>
+        <a class="nav-item" href="/watchlist" title="Watchlist"><span class="nav-icon">W</span><span class="nav-text">Watchlist</span></a>
+        <a class="nav-item" href="/positions" title="Positionen"><span class="nav-icon">P</span><span class="nav-text">Positionen</span></a>
+      </nav>
+      <div class="nav-footer">Status & Optionen</div>
+    </aside>
+    <main class="main">
+      <div class="container">
+        <header>
+          <div>
+            <div class="sub">Verwaltung</div>
+            <h1>Kursquellen</h1>
+            <div class="sub">Status und Optionen je Quelle (Ausbau folgt)</div>
+          </div>
+        </header>
+
+        <div id="status" class="status info">Lade...</div>
+
+        <section class="card" style="margin-top: 16px;">
+          <div class="inline-form" style="justify-content: space-between; align-items: center;">
+            <div>
+              <h2>Quellenstatus</h2>
+              <div class="sub">Auto-Refresh alle 10s</div>
+            </div>
+            <span class="pill">letztes Update: <span id="updatedAt">—</span></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Quelle</th>
+                  <th>Status</th>
+                  <th class="num">Preise</th>
+                  <th class="num">Updates</th>
+                  <th>Mapping</th>
+                </tr>
+              </thead>
+              <tbody id="sourcesTbody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const sourcesTbody = document.getElementById("sourcesTbody");
+    const updatedAtEl = document.getElementById("updatedAt");
+    const navToggle = document.getElementById("navToggle");
+    const storedNav = localStorage.getItem("pv_nav_collapsed");
+    if (storedNav === "1") document.body.classList.add("nav-collapsed");
+    if (navToggle) {
+      navToggle.onclick = () => {
+        document.body.classList.toggle("nav-collapsed");
+        localStorage.setItem(
+          "pv_nav_collapsed",
+          document.body.classList.contains("nav-collapsed") ? "1" : "0"
+        );
+      };
+    }
+
+    function setStatus(level, message) {
+      statusEl.className = "status " + level;
+      statusEl.textContent = message;
+    }
+
+    async function api(path, options={}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) return await res.json();
+      return await res.text();
+    }
+
+    function fmtNum(n) {
+      if (n === null || n === undefined) return "—";
+      if (!isFinite(n)) return "—";
+      return Number(n).toLocaleString();
+    }
+
+    async function loadSources() {
+      const [debug, bitfinex] = await Promise.all([
+        api("/api/debug/quote-sources"),
+        api("/api/debug/bitfinex"),
+      ]);
+      const sources = debug.known_sources || Object.keys(debug.source_stats || {});
+      const stats = debug.source_stats || {};
+      const mappings = debug.mappings || {};
+      sourcesTbody.innerHTML = "";
+      for (const src of sources) {
+        const row = document.createElement("tr");
+        const tdName = document.createElement("td");
+        const tdStatus = document.createElement("td");
+        const tdPrices = document.createElement("td");
+        const tdUpdates = document.createElement("td");
+        const tdMapping = document.createElement("td");
+        tdPrices.className = "num";
+        tdUpdates.className = "num";
+
+        tdName.textContent = src;
+        const stat = stats[src] || {};
+        tdPrices.textContent = fmtNum(stat.prices || 0);
+        tdUpdates.textContent = fmtNum(stat.last_updates || 0);
+
+        let status = "—";
+        let mapping = "—";
+        if (src === "bitfinex") {
+          status = bitfinex.status || (bitfinex.enabled ? "enabled" : "disabled");
+          const symbols = (bitfinex.subscribed_symbols || []).length;
+          const acked = (bitfinex.acked_symbols || []).length;
+          mapping = `symbole: ${symbols} (ack: ${acked})`;
+        } else if (src === "tradegate") {
+          const cnt = Object.keys(mappings.tradegate || {}).length;
+          mapping = `isin: ${cnt}`;
+        } else if (src === "lightstreamer") {
+          const cnt = (mappings.lightstreamer || []).length;
+          mapping = `items: ${cnt}`;
+        }
+        tdStatus.textContent = status;
+        tdMapping.textContent = mapping;
+
+        row.appendChild(tdName);
+        row.appendChild(tdStatus);
+        row.appendChild(tdPrices);
+        row.appendChild(tdUpdates);
+        row.appendChild(tdMapping);
+        sourcesTbody.appendChild(row);
+      }
+      updatedAtEl.textContent = new Date().toLocaleTimeString();
+    }
+
+    async function refreshLoop() {
+      try {
+        await loadSources();
+        setStatus("success", "Aktualisiert.");
+      } catch (e) {
+        setStatus("error", String(e.message || e));
+      }
+    }
+
+    refreshLoop();
+    setInterval(refreshLoop, 10000);
+  </script>
+</body>
+</html>

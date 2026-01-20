@@ -14,6 +14,13 @@
       --line: #e6e9f0;
       --accent: #2d6cdf;
       --accent-soft: #eef3ff;
+      --nav-bg: #0f172a;
+      --nav-text: #e2e8f0;
+      --nav-muted: #94a3b8;
+      --nav-hover: #1e293b;
+      --nav-active: #1d4ed8;
+      --nav-width: 240px;
+      --nav-collapsed: 72px;
     }
     * { box-sizing: border-box; }
     body {
@@ -22,7 +29,62 @@
       background: var(--bg);
       color: var(--text);
     }
-    .container { max-width: 1240px; margin: 0 auto; padding: 24px; }
+    .app { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: var(--nav-width);
+      background: var(--nav-bg);
+      color: var(--nav-text);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 18px 14px;
+      transition: width 0.2s ease;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--nav-active);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+    .brand-title { font-weight: 600; letter-spacing: 0.02em; }
+    .nav-toggle {
+      margin-left: auto;
+      border: 1px solid #334155;
+      background: transparent;
+      color: var(--nav-text);
+      border-radius: 8px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .nav { display: flex; flex-direction: column; gap: 6px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      color: var(--nav-text);
+      text-decoration: none;
+    }
+    .nav-item:hover { background: var(--nav-hover); }
+    .nav-item.active {
+      background: #1f2a44;
+      border: 1px solid #334155;
+    }
+    .nav-icon { width: 22px; text-align: center; font-weight: 600; }
+    .nav-text { white-space: nowrap; }
+    .nav-footer { margin-top: auto; font-size: 12px; color: var(--nav-muted); }
+    .main { flex: 1; min-width: 0; }
+    .container { max-width: 1240px; margin: 0 auto; padding: 24px 32px 32px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     h1 { margin: 0; font-size: 28px; }
     h2 { margin: 0 0 6px 0; font-size: 20px; }
@@ -99,7 +161,16 @@
       overflow: auto;
       margin-top: 12px;
     }
+    body.nav-collapsed .sidebar { width: var(--nav-collapsed); }
+    body.nav-collapsed .nav-text,
+    body.nav-collapsed .brand-title,
+    body.nav-collapsed .nav-footer { display: none; }
     @media (max-width: 900px) {
+      .app { flex-direction: column; }
+      .sidebar { width: 100%; flex-direction: row; align-items: center; }
+      body.nav-collapsed .sidebar { width: 100%; }
+      .nav { flex-direction: row; flex-wrap: wrap; }
+      .nav-footer { display: none; }
       header { align-items: flex-start; }
       .actions { width: 100%; justify-content: flex-start; }
       .span-2 { grid-column: span 1; }
@@ -107,22 +178,35 @@
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div>
-        <div class="sub">Stammdaten & Kursquellen</div>
-        <h1>Instrumente</h1>
-        <div class="sub">Kursquellen, Prioritaeten und Live-Checks</div>
+  <div class="app">
+    <aside class="sidebar" id="sideNav">
+      <div class="brand">
+        <div class="logo">PV</div>
+        <div class="brand-title">Portfolio</div>
+        <button id="navToggle" class="nav-toggle" aria-label="Menue umschalten">≡</button>
       </div>
-      <div class="actions">
-        <a class="button ghost" href="/">Dashboard</a>
-        <a class="button ghost" href="/manage">Portfolio</a>
-      </div>
-    </header>
+      <nav class="nav">
+        <a class="nav-item" href="/" title="Uebersicht"><span class="nav-icon">U</span><span class="nav-text">Uebersicht</span></a>
+        <a class="nav-item active" href="/instruments" title="Instrumente"><span class="nav-icon">I</span><span class="nav-text">Instrumente</span></a>
+        <a class="nav-item" href="/sources" title="Kursquellen"><span class="nav-icon">K</span><span class="nav-text">Kursquellen</span></a>
+        <a class="nav-item" href="/watchlist" title="Watchlist"><span class="nav-icon">W</span><span class="nav-text">Watchlist</span></a>
+        <a class="nav-item" href="/positions" title="Positionen"><span class="nav-icon">P</span><span class="nav-text">Positionen</span></a>
+      </nav>
+      <div class="nav-footer">Stammdaten & Quellen</div>
+    </aside>
+    <main class="main">
+      <div class="container">
+        <header>
+          <div>
+            <div class="sub">Stammdaten & Kursquellen</div>
+            <h1>Instrumente</h1>
+            <div class="sub">Kursquellen, Prioritaeten und Live-Checks</div>
+          </div>
+        </header>
 
-    <div id="status" class="status info">Lade...</div>
+        <div id="status" class="status info">Lade...</div>
 
-    <div class="grid">
+        <div class="grid">
       <section class="card span-2">
         <h2>Instrumente</h2>
         <div class="sub">Basisdaten fuer Positionen und Watchlist</div>
@@ -275,11 +359,25 @@
         </div>
         <pre id="debugOutput" class="debug">{}</pre>
       </section>
-    </div>
+        </div>
+      </div>
+    </main>
   </div>
 
   <script>
     const statusEl = document.getElementById("status");
+    const navToggle = document.getElementById("navToggle");
+    const storedNav = localStorage.getItem("pv_nav_collapsed");
+    if (storedNav === "1") document.body.classList.add("nav-collapsed");
+    if (navToggle) {
+      navToggle.onclick = () => {
+        document.body.classList.toggle("nav-collapsed");
+        localStorage.setItem(
+          "pv_nav_collapsed",
+          document.body.classList.contains("nav-collapsed") ? "1" : "0"
+        );
+      };
+    }
 
     const instrumentsTbody = document.getElementById("instrumentsTbody");
     const newInstrumentCode = document.getElementById("newInstrumentCode");
