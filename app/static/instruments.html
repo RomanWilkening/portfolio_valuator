@@ -150,6 +150,8 @@
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
+    .drag-handle { cursor: grab; color: var(--muted); font-weight: 700; }
+    tr.dragging { opacity: 0.5; }
     pre.debug {
       background: #0f172a;
       color: #e2e8f0;
@@ -257,16 +259,15 @@
             <option value="bitfinex">Bitfinex</option>
           </select>
           <input id="newInstrumentSourceCode" placeholder="Source-ID (z.B. ISIN, LS Item, BTCUSD)" />
-          <input id="newInstrumentSourcePriority" type="number" min="0" max="1000" placeholder="Prioritaet" />
           <button id="addInstrumentSourceBtn" class="button">Quelle hinzufuegen</button>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th></th>
                 <th>Quelle</th>
                 <th>Source-ID</th>
-                <th class="num">Prioritaet</th>
                 <th class="num">Preis</th>
                 <th>Aktiv</th>
                 <th>Letztes Update</th>
@@ -329,16 +330,15 @@
             <option value="bitfinex">Bitfinex</option>
           </select>
           <input id="newFxSourceCode" placeholder="Source-ID (z.B. ISIN, LS Item, BTCUSD)" />
-          <input id="newFxSourcePriority" type="number" min="0" max="1000" placeholder="Prioritaet" />
           <button id="addFxSourceBtn" class="button">Quelle hinzufuegen</button>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th></th>
                 <th>Quelle</th>
                 <th>Source-ID</th>
-                <th class="num">Prioritaet</th>
                 <th class="num">Preis</th>
                 <th>Aktiv</th>
                 <th>Letztes Update</th>
@@ -400,7 +400,6 @@
     const sourceInstrumentSelect = document.getElementById("sourceInstrumentSelect");
     const newInstrumentSourceType = document.getElementById("newInstrumentSourceType");
     const newInstrumentSourceCode = document.getElementById("newInstrumentSourceCode");
-    const newInstrumentSourcePriority = document.getElementById("newInstrumentSourcePriority");
     const addInstrumentSourceBtn = document.getElementById("addInstrumentSourceBtn");
     const instrumentSourcesTbody = document.getElementById("instrumentSourcesTbody");
     const refreshInstrumentSourcesBtn = document.getElementById("refreshInstrumentSourcesBtn");
@@ -408,7 +407,6 @@
     const sourceFxSelect = document.getElementById("sourceFxSelect");
     const newFxSourceType = document.getElementById("newFxSourceType");
     const newFxSourceCode = document.getElementById("newFxSourceCode");
-    const newFxSourcePriority = document.getElementById("newFxSourcePriority");
     const addFxSourceBtn = document.getElementById("addFxSourceBtn");
     const fxSourcesTbody = document.getElementById("fxSourcesTbody");
     const refreshFxSourcesBtn = document.getElementById("refreshFxSourcesBtn");
@@ -451,6 +449,54 @@
       const ct = res.headers.get("content-type") || "";
       if (ct.includes("application/json")) return await res.json();
       return await res.text();
+    }
+
+    function getDragAfterElement(container, y) {
+      const els = [...container.querySelectorAll("tr:not(.dragging)")];
+      return els.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        const offset = y - box.top - box.height / 2;
+        if (offset < 0 && offset > closest.offset) {
+          return { offset, element: child };
+        }
+        return closest;
+      }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+
+    function setupRowDrag(tbody, onReorder) {
+      let dragging = null;
+      tbody.addEventListener("dragstart", (e) => {
+        const handle = e.target.closest(".drag-handle");
+        if (!handle) return;
+        const tr = e.target.closest("tr");
+        if (!tr) return;
+        dragging = tr;
+        tr.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+      });
+      tbody.addEventListener("dragend", () => {
+        if (dragging) dragging.classList.remove("dragging");
+        dragging = null;
+      });
+      tbody.addEventListener("dragover", (e) => {
+        if (!dragging) return;
+        e.preventDefault();
+        const after = getDragAfterElement(tbody, e.clientY);
+        if (after == null) {
+          tbody.appendChild(dragging);
+        } else {
+          tbody.insertBefore(dragging, after);
+        }
+      });
+      tbody.addEventListener("drop", async () => {
+        if (!dragging) return;
+        const ids = [...tbody.querySelectorAll("tr")]
+          .map(row => Number(row.dataset.id))
+          .filter(Boolean);
+        if (ids.length) {
+          await onReorder(ids);
+        }
+      });
     }
 
     function renderInstrumentSelect(select, instruments, selectedId) {
@@ -640,24 +686,25 @@
       instrumentSourcesTbody.innerHTML = "";
       for (const src of state.instrumentSources) {
         const tr = document.createElement("tr");
+        tr.dataset.id = String(src.id || "");
+        const tdDrag = document.createElement("td");
         const tdSource = document.createElement("td");
         const tdCode = document.createElement("td");
-        const tdPriority = document.createElement("td");
         const tdPrice = document.createElement("td");
         const tdActive = document.createElement("td");
         const tdUpdated = document.createElement("td");
         const tdActions = document.createElement("td");
 
+        const dragHandle = document.createElement("span");
+        dragHandle.className = "drag-handle";
+        dragHandle.textContent = "⋮⋮";
+        dragHandle.draggable = true;
+        tdDrag.appendChild(dragHandle);
+
         tdSource.textContent = (src.source || "").toLowerCase();
 
         const codeInput = document.createElement("input");
         codeInput.value = src.source_code || "";
-        const priorityInput = document.createElement("input");
-        priorityInput.type = "number";
-        priorityInput.min = "0";
-        priorityInput.max = "1000";
-        priorityInput.value = String(src.priority ?? 100);
-        priorityInput.classList.add("num");
 
         tdPrice.classList.add("num");
         tdPrice.textContent = (src.price === null || src.price === undefined) ? "—" : fmtNum(src.price);
@@ -670,14 +717,12 @@
             method: "PUT",
             body: JSON.stringify({
               source_code: codeInput.value.trim(),
-              priority: Number(priorityInput.value),
             }),
           });
           await loadInstrumentSources();
           setStatus("success", "Kursquelle gespeichert.");
         };
         codeInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
-        priorityInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
 
         const delBtn = document.createElement("button");
         delBtn.className = "button ghost";
@@ -690,12 +735,11 @@
         };
 
         tdCode.appendChild(codeInput);
-        tdPriority.appendChild(priorityInput);
         tdActions.appendChild(delBtn);
 
+        tr.appendChild(tdDrag);
         tr.appendChild(tdSource);
         tr.appendChild(tdCode);
-        tr.appendChild(tdPriority);
         tr.appendChild(tdPrice);
         tr.appendChild(tdActive);
         tr.appendChild(tdUpdated);
@@ -708,24 +752,25 @@
       fxSourcesTbody.innerHTML = "";
       for (const src of state.fxSources) {
         const tr = document.createElement("tr");
+        tr.dataset.id = String(src.id || "");
+        const tdDrag = document.createElement("td");
         const tdSource = document.createElement("td");
         const tdCode = document.createElement("td");
-        const tdPriority = document.createElement("td");
         const tdPrice = document.createElement("td");
         const tdActive = document.createElement("td");
         const tdUpdated = document.createElement("td");
         const tdActions = document.createElement("td");
 
+        const dragHandle = document.createElement("span");
+        dragHandle.className = "drag-handle";
+        dragHandle.textContent = "⋮⋮";
+        dragHandle.draggable = true;
+        tdDrag.appendChild(dragHandle);
+
         tdSource.textContent = (src.source || "").toLowerCase();
 
         const codeInput = document.createElement("input");
         codeInput.value = src.source_code || "";
-        const priorityInput = document.createElement("input");
-        priorityInput.type = "number";
-        priorityInput.min = "0";
-        priorityInput.max = "1000";
-        priorityInput.value = String(src.priority ?? 100);
-        priorityInput.classList.add("num");
 
         tdPrice.classList.add("num");
         tdPrice.textContent = (src.price === null || src.price === undefined) ? "—" : fmtNum(src.price);
@@ -738,14 +783,12 @@
             method: "PUT",
             body: JSON.stringify({
               source_code: codeInput.value.trim(),
-              priority: Number(priorityInput.value),
             }),
           });
           await loadFxSources();
           setStatus("success", "FX-Quelle gespeichert.");
         };
         codeInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
-        priorityInput.onchange = () => saveRow().catch(e => setStatus("error", String(e.message || e)));
 
         const delBtn = document.createElement("button");
         delBtn.className = "button ghost";
@@ -758,12 +801,11 @@
         };
 
         tdCode.appendChild(codeInput);
-        tdPriority.appendChild(priorityInput);
         tdActions.appendChild(delBtn);
 
+        tr.appendChild(tdDrag);
         tr.appendChild(tdSource);
         tr.appendChild(tdCode);
-        tr.appendChild(tdPriority);
         tr.appendChild(tdPrice);
         tr.appendChild(tdActive);
         tr.appendChild(tdUpdated);
@@ -780,6 +822,13 @@
       }
       renderInstruments();
       renderInstrumentSelect(sourceInstrumentSelect, state.instruments, sourceInstrumentSelect.value);
+      const selectedId = Number(sourceInstrumentSelect.value);
+      if (selectedId && !state.instrumentById[selectedId]) {
+        sourceInstrumentSelect.value = "";
+      }
+      if (!sourceInstrumentSelect.value && state.instruments.length) {
+        sourceInstrumentSelect.value = String(state.instruments[0].id);
+      }
       updateDebugKeyFromInstrument();
       await loadInstrumentSources();
     }
@@ -792,6 +841,13 @@
       }
       renderFxRates();
       renderFxSelect(sourceFxSelect, state.fxRates, sourceFxSelect.value);
+      const selectedId = Number(sourceFxSelect.value);
+      if (selectedId && !state.fxById[selectedId]) {
+        sourceFxSelect.value = "";
+      }
+      if (!sourceFxSelect.value && state.fxRates.length) {
+        sourceFxSelect.value = String(state.fxRates[0].id);
+      }
       updateDebugKeyFromFx();
       await loadFxSources();
     }
@@ -816,6 +872,30 @@
       }
       state.fxSources = await api(`/api/fx-rates/${fxId}/sources/quotes`);
       renderFxSources();
+    }
+
+    async function saveInstrumentSourceOrder(ids) {
+      const instrumentId = Number(sourceInstrumentSelect.value);
+      if (!instrumentId) return;
+      setStatus("info", "Speichere Sortierung...");
+      await api(`/api/instruments/${instrumentId}/sources/order`, {
+        method: "PUT",
+        body: JSON.stringify({ ids }),
+      });
+      await loadInstrumentSources();
+      setStatus("success", "Sortierung gespeichert.");
+    }
+
+    async function saveFxSourceOrder(ids) {
+      const fxId = Number(sourceFxSelect.value);
+      if (!fxId) return;
+      setStatus("info", "Speichere Sortierung...");
+      await api(`/api/fx-rates/${fxId}/sources/order`, {
+        method: "PUT",
+        body: JSON.stringify({ ids }),
+      });
+      await loadFxSources();
+      setStatus("success", "Sortierung gespeichert.");
     }
 
     function updateDebugKeyFromInstrument() {
@@ -906,7 +986,6 @@
       }
       const source = newInstrumentSourceType.value;
       const sourceCode = newInstrumentSourceCode.value.trim();
-      const priority = Number(newInstrumentSourcePriority.value || 100);
       if (!sourceCode) {
         setStatus("warn", "Bitte eine Source-ID angeben.");
         return;
@@ -914,10 +993,9 @@
       setStatus("info", "Fuege Kursquelle hinzu...");
       await api(`/api/instruments/${instrumentId}/sources`, {
         method: "POST",
-        body: JSON.stringify({ source, source_code: sourceCode, priority }),
+        body: JSON.stringify({ source, source_code: sourceCode }),
       });
       newInstrumentSourceCode.value = "";
-      newInstrumentSourcePriority.value = "";
       await loadInstrumentSources();
       setStatus("success", "Kursquelle hinzugefuegt.");
     }
@@ -930,7 +1008,6 @@
       }
       const source = newFxSourceType.value;
       const sourceCode = newFxSourceCode.value.trim();
-      const priority = Number(newFxSourcePriority.value || 100);
       if (!sourceCode) {
         setStatus("warn", "Bitte eine Source-ID angeben.");
         return;
@@ -938,10 +1015,9 @@
       setStatus("info", "Fuege FX-Quelle hinzu...");
       await api(`/api/fx-rates/${fxId}/sources`, {
         method: "POST",
-        body: JSON.stringify({ source, source_code: sourceCode, priority }),
+        body: JSON.stringify({ source, source_code: sourceCode }),
       });
       newFxSourceCode.value = "";
-      newFxSourcePriority.value = "";
       await loadFxSources();
       setStatus("success", "FX-Quelle hinzugefuegt.");
     }
@@ -962,6 +1038,9 @@
     };
     debugSourcesBtn.onclick = () => loadDebugSources().catch(e => setStatus("error", String(e.message || e)));
     debugBitfinexBtn.onclick = () => loadDebugBitfinex().catch(e => setStatus("error", String(e.message || e)));
+
+    setupRowDrag(instrumentSourcesTbody, saveInstrumentSourceOrder);
+    setupRowDrag(fxSourcesTbody, saveFxSourceOrder);
 
     Promise.all([loadInstruments(), loadFxRates()])
       .then(() => setStatus("success", "Bereit."))

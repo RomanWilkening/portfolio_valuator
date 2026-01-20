@@ -131,6 +131,8 @@
       font-size: 14px;
     }
     .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .drag-handle { cursor: grab; color: var(--muted); font-weight: 700; }
+    tr.dragging { opacity: 0.5; }
     body.nav-collapsed .sidebar { width: var(--nav-collapsed); }
     body.nav-collapsed .nav-text,
     body.nav-collapsed .brand-title,
@@ -182,6 +184,7 @@
             <table>
               <thead>
                 <tr>
+                  <th></th>
                   <th>Instrument</th>
                   <th>Label</th>
                   <th>Waehrung</th>
@@ -249,6 +252,54 @@
       return await res.text();
     }
 
+    function getDragAfterElement(container, y) {
+      const els = [...container.querySelectorAll("tr:not(.dragging)")];
+      return els.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        const offset = y - box.top - box.height / 2;
+        if (offset < 0 && offset > closest.offset) {
+          return { offset, element: child };
+        }
+        return closest;
+      }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+
+    function setupRowDrag(tbody, onReorder) {
+      let dragging = null;
+      tbody.addEventListener("dragstart", (e) => {
+        const handle = e.target.closest(".drag-handle");
+        if (!handle) return;
+        const tr = e.target.closest("tr");
+        if (!tr) return;
+        dragging = tr;
+        tr.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+      });
+      tbody.addEventListener("dragend", () => {
+        if (dragging) dragging.classList.remove("dragging");
+        dragging = null;
+      });
+      tbody.addEventListener("dragover", (e) => {
+        if (!dragging) return;
+        e.preventDefault();
+        const after = getDragAfterElement(tbody, e.clientY);
+        if (after == null) {
+          tbody.appendChild(dragging);
+        } else {
+          tbody.insertBefore(dragging, after);
+        }
+      });
+      tbody.addEventListener("drop", async () => {
+        if (!dragging) return;
+        const ids = [...tbody.querySelectorAll("tr")]
+          .map(row => Number(row.dataset.id))
+          .filter(Boolean);
+        if (ids.length) {
+          await onReorder(ids);
+        }
+      });
+    }
+
     function renderInstrumentSelect(select, instruments, selectedId) {
       select.innerHTML = "";
       const placeholder = document.createElement("option");
@@ -269,10 +320,18 @@
       watchlistTbody.innerHTML = "";
       for (const item of state.watchlist) {
         const tr = document.createElement("tr");
+        tr.dataset.id = String(item.id || "");
+        const tdDrag = document.createElement("td");
         const tdInst = document.createElement("td");
         const tdLabel = document.createElement("td");
         const tdCurr = document.createElement("td");
         const tdActions = document.createElement("td");
+
+        const dragHandle = document.createElement("span");
+        dragHandle.className = "drag-handle";
+        dragHandle.textContent = "⋮⋮";
+        dragHandle.draggable = true;
+        tdDrag.appendChild(dragHandle);
 
         const instSelect = document.createElement("select");
         renderInstrumentSelect(instSelect, state.instruments, item.instrument_id);
@@ -316,6 +375,7 @@
         tdCurr.appendChild(currSelect);
         tdActions.appendChild(delBtn);
 
+        tr.appendChild(tdDrag);
         tr.appendChild(tdInst);
         tr.appendChild(tdLabel);
         tr.appendChild(tdCurr);
@@ -333,6 +393,16 @@
     async function loadWatchlist() {
       state.watchlist = await api("/api/watchlist");
       renderWatchlist();
+    }
+
+    async function saveWatchlistOrder(ids) {
+      setStatus("info", "Speichere Sortierung...");
+      await api("/api/watchlist/order", {
+        method: "PUT",
+        body: JSON.stringify({ ids }),
+      });
+      await loadWatchlist();
+      setStatus("success", "Sortierung gespeichert.");
     }
 
     async function addWatchlistItem() {
@@ -370,6 +440,8 @@
       const inst = state.instruments.find(i => String(i.id) === String(newWatchInstrument.value));
       if (inst && inst.currency) newWatchCurrency.value = inst.currency;
     };
+
+    setupRowDrag(watchlistTbody, saveWatchlistOrder);
 
     Promise.all([loadInstruments(), loadWatchlist()])
       .then(() => setStatus("success", "Bereit."))
