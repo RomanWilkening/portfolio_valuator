@@ -441,7 +441,7 @@
     }
 
     async function api(path, options={}) {
-      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      const res = await fetch(path, { cache: "no-store", headers: { "Content-Type": "application/json" }, ...options });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(txt || ("HTTP " + res.status));
@@ -584,10 +584,14 @@
         delBtn.textContent = "Loeschen";
         delBtn.onclick = async () => {
           if (!confirm(`Instrument loeschen?\\n\\n${inst.name} (${inst.code})`)) return;
-          setStatus("info", "Loesche Instrument...");
-          await api(`/api/instruments/${inst.id}`, { method: "DELETE" });
-          await loadInstruments();
-          setStatus("success", "Instrument geloescht.");
+          try {
+            setStatus("info", "Loesche Instrument...");
+            await api(`/api/instruments/${inst.id}`, { method: "DELETE" });
+            await loadInstruments();
+            setStatus("success", "Instrument geloescht.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
+          }
         };
 
         tdCode.appendChild(codeInput);
@@ -657,10 +661,14 @@
         delBtn.textContent = "Loeschen";
         delBtn.onclick = async () => {
           if (!confirm(`FX-Instrument loeschen?\\n\\n${fx.name} (${fx.code})`)) return;
-          setStatus("info", "Loesche FX-Instrument...");
-          await api(`/api/fx-rates/${fx.id}`, { method: "DELETE" });
-          await loadFxRates();
-          setStatus("success", "FX-Instrument geloescht.");
+          try {
+            setStatus("info", "Loesche FX-Instrument...");
+            await api(`/api/fx-rates/${fx.id}`, { method: "DELETE" });
+            await loadFxRates();
+            setStatus("success", "FX-Instrument geloescht.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
+          }
         };
 
         tdCode.appendChild(codeInput);
@@ -728,10 +736,14 @@
         delBtn.className = "button ghost";
         delBtn.textContent = "Loeschen";
         delBtn.onclick = async () => {
-          setStatus("info", "Loesche Kursquelle...");
-          await api(`/api/instruments/${sourceInstrumentSelect.value}/sources/${src.id}`, { method: "DELETE" });
-          await loadInstrumentSources();
-          setStatus("success", "Kursquelle geloescht.");
+          try {
+            setStatus("info", "Loesche Kursquelle...");
+            await api(`/api/instruments/${sourceInstrumentSelect.value}/sources/${src.id}`, { method: "DELETE" });
+            await loadInstrumentSources();
+            setStatus("success", "Kursquelle geloescht.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
+          }
         };
 
         tdCode.appendChild(codeInput);
@@ -794,10 +806,14 @@
         delBtn.className = "button ghost";
         delBtn.textContent = "Loeschen";
         delBtn.onclick = async () => {
-          setStatus("info", "Loesche FX-Quelle...");
-          await api(`/api/fx-rates/${sourceFxSelect.value}/sources/${src.id}`, { method: "DELETE" });
-          await loadFxSources();
-          setStatus("success", "FX-Quelle geloescht.");
+          try {
+            setStatus("info", "Loesche FX-Quelle...");
+            await api(`/api/fx-rates/${sourceFxSelect.value}/sources/${src.id}`, { method: "DELETE" });
+            await loadFxSources();
+            setStatus("success", "FX-Quelle geloescht.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
+          }
         };
 
         tdCode.appendChild(codeInput);

@@ -242,7 +242,7 @@
     }
 
     async function api(path, options={}) {
-      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      const res = await fetch(path, { cache: "no-store", headers: { "Content-Type": "application/json" }, ...options });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(txt || ("HTTP " + res.status));
@@ -364,10 +364,14 @@
         delBtn.className = "button ghost";
         delBtn.textContent = "Entfernen";
         delBtn.onclick = async () => {
-          setStatus("info", "Entferne Watchlist-Eintrag...");
-          await api(`/api/watchlist/${item.id}`, { method: "DELETE" });
-          await loadWatchlist();
-          setStatus("success", "Watchlist-Eintrag entfernt.");
+          try {
+            setStatus("info", "Entferne Watchlist-Eintrag...");
+            await api(`/api/watchlist/${item.id}`, { method: "DELETE" });
+            await loadWatchlist();
+            setStatus("success", "Watchlist-Eintrag entfernt.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
+          }
         };
 
         tdInst.appendChild(instSelect);

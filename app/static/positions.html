@@ -323,7 +323,7 @@
     }
 
     async function api(path, options={}) {
-      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      const res = await fetch(path, { cache: "no-store", headers: { "Content-Type": "application/json" }, ...options });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(txt || ("HTTP " + res.status));
@@ -449,14 +449,18 @@
         delBtn.textContent = "Loeschen";
         delBtn.onclick = async () => {
           if (!confirm(`Portfolio loeschen?\\n\\n${pf.name} (#${pf.id})`)) return;
-          setStatus("info", "Loesche Portfolio...");
-          await api(`/api/portfolios/${pf.id}`, { method: "DELETE" });
-          await loadPortfolios();
-          if (state.activePortfolioId === pf.id) {
-            state.activePortfolioId = state.portfolios[0]?.id || null;
-            if (state.activePortfolioId) await loadPortfolio(state.activePortfolioId);
+          try {
+            setStatus("info", "Loesche Portfolio...");
+            await api(`/api/portfolios/${pf.id}`, { method: "DELETE" });
+            await loadPortfolios();
+            if (state.activePortfolioId === pf.id) {
+              state.activePortfolioId = state.portfolios[0]?.id || null;
+              if (state.activePortfolioId) await loadPortfolio(state.activePortfolioId);
+            }
+            setStatus("success", "Portfolio geloescht.");
+          } catch (e) {
+            setStatus("error", String(e.message || e));
           }
-          setStatus("success", "Portfolio geloescht.");
         };
 
         tdName.appendChild(nameInput);
