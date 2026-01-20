@@ -378,6 +378,7 @@ class TradegatePoller:
 
                 await asyncio.sleep(max(0.5, float(self.settings.poll_s)))
             except asyncio.CancelledError:
+                self.status = "stopped"
                 break
             except Exception:
                 logger.exception("TradegatePoller error")
@@ -438,6 +439,12 @@ class BitfinexStream:
         self._task: Optional[asyncio.Task] = None
         self._mapping: Dict[str, set[str]] = {}
         self._version = 0
+        self.status = "stopped"
+        self.last_error: Optional[str] = None
+        self.last_connect_at: Optional[str] = None
+        self.last_message_at: Optional[str] = None
+        self.subscribed_symbols: set[str] = set()
+        self.acked_symbols: set[str] = set()
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -447,6 +454,7 @@ class BitfinexStream:
     def stop(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
+        self.status = "stopped"
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
@@ -454,6 +462,22 @@ class BitfinexStream:
     def set_mapping(self, mapping: Dict[str, set[str]]) -> None:
         self._mapping = {k: set(v) for k, v in (mapping or {}).items() if k and v}
         self._version += 1
+        self.subscribed_symbols = set(self._mapping.keys())
+        self.acked_symbols = set()
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": self._enabled,
+            "status": self.status,
+            "wss_url": self.settings.wss_url,
+            "mapping": {sym: sorted(list(keys)) for sym, keys in self._mapping.items()},
+            "subscribed_symbols": sorted(self.subscribed_symbols),
+            "acked_symbols": sorted(self.acked_symbols),
+            "last_connect_at": self.last_connect_at,
+            "last_message_at": self.last_message_at,
+            "last_error": self.last_error,
+            "version": self._version,
+        }
 
     async def _run(self) -> None:
         import websockets
@@ -461,14 +485,23 @@ class BitfinexStream:
         backoff_s = max(0.1, self.settings.reconnect_min_s)
         while True:
             try:
-                if not self._enabled or not self._mapping:
+                if not self._enabled:
+                    self.status = "disabled"
+                    await asyncio.sleep(0.5)
+                    continue
+                if not self._mapping:
+                    self.status = "idle"
                     await asyncio.sleep(0.5)
                     continue
 
                 version = self._version
                 symbols = list(self._mapping.keys())
 
+                self.status = "connecting"
+                self.last_connect_at = now_iso()
+                self.last_error = None
                 async with websockets.connect(self.settings.wss_url, ping_interval=20, ping_timeout=20) as ws:
+                    self.status = "connected"
                     chan_to_symbol: Dict[int, str] = {}
                     for symbol in symbols:
                         await ws.send(json.dumps({"event": "subscribe", "channel": "ticker", "symbol": symbol}))
@@ -486,6 +519,7 @@ class BitfinexStream:
                                 sym = msg.get("symbol")
                                 if isinstance(chan_id, int) and sym:
                                     chan_to_symbol[chan_id] = sym
+                                    self.acked_symbols.add(sym)
                             continue
 
                         if not isinstance(msg, list) or len(msg) < 2:
@@ -496,6 +530,7 @@ class BitfinexStream:
                             continue
                         if not isinstance(chan_id, int) or chan_id not in chan_to_symbol:
                             continue
+                        self.last_message_at = now_iso()
                         symbol = chan_to_symbol[chan_id]
                         data = payload if isinstance(payload, list) else None
                         if not data or len(data) < 7:
@@ -525,7 +560,9 @@ class BitfinexStream:
 
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
+                self.status = "error"
+                self.last_error = str(exc)
                 logger.exception("BitfinexStream error")
                 await asyncio.sleep(backoff_s)
                 backoff_s = min(self.settings.reconnect_max_s, max(self.settings.reconnect_min_s, backoff_s * 2.0))

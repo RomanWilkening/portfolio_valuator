@@ -680,6 +680,8 @@ class StreamManager:
             on_best_update=self._on_source_update,
         )
         self.instrument_by_code: Dict[str, Dict[str, Any]] = {}
+        self.debug_mappings: Dict[str, Any] = {}
+        self.debug_mappings_updated_at: Optional[str] = None
         if SOURCE_TRADEGATE in self.quote_router.default_priority:
             self.tradegate_poller = TradegatePoller(
                 settings=TRADEGATE_SETTINGS,
@@ -865,6 +867,13 @@ class StreamManager:
 
                 items = [t[0] for t in targets]
                 idx_to_key = {idx + 1: t[1] for idx, t in enumerate(targets)}
+
+                self.debug_mappings = {
+                    "lightstreamer": [{"item": item, "key": key} for item, key in targets],
+                    "tradegate": dict(tradegate_map),
+                    "bitfinex": {symbol: sorted(list(keys)) for symbol, keys in bitfinex_map.items()},
+                }
+                self.debug_mappings_updated_at = now_iso()
 
                 if items == last_items and not self._dirty.is_set():
                     # keep current session
@@ -1417,6 +1426,19 @@ def _get_source_last_update(source: str, key: str) -> Optional[str]:
     return stream_manager.quote_router.source_last_update.get(src, {}).get(key)
 
 
+def _build_source_stats() -> Dict[str, Any]:
+    router = stream_manager.quote_router
+    stats: Dict[str, Any] = {}
+    for src in sorted(router.known_sources):
+        stats[src] = {
+            "prices": len(router.source_prices.get(src, {})),
+            "bids": len(router.source_bids.get(src, {})),
+            "watch_prices": len(router.source_watch_prices.get(src, {})),
+            "last_updates": len(router.source_last_update.get(src, {})),
+        }
+    return stats
+
+
 
 
 def _get_instrument(instrument_id: int) -> Dict[str, Any]:
@@ -1482,6 +1504,71 @@ async def manage():
 @app.get("/instruments")
 async def instruments_page():
     return FileResponse("app/static/instruments.html")
+
+
+@app.get("/api/debug/quote-sources")
+async def debug_quote_sources(key: Optional[str] = None) -> Dict[str, Any]:
+    router = stream_manager.quote_router
+    key = (key or "").strip()
+    if key:
+        sources: List[Dict[str, Any]] = []
+        for src in sorted(router.known_sources):
+            sources.append(
+                {
+                    "source": src,
+                    "price": router.source_prices.get(src, {}).get(key),
+                    "price_field": router.source_price_fields.get(src, {}).get(key),
+                    "bid": router.source_bids.get(src, {}).get(key),
+                    "watch_price": router.source_watch_prices.get(src, {}).get(key),
+                    "last_update": router.source_last_update.get(src, {}).get(key),
+                    "active": router.best_price_source.get(key) == src,
+                }
+            )
+        debug_map = stream_manager.debug_mappings or {}
+        ls_items = [
+            item.get("item")
+            for item in (debug_map.get("lightstreamer") or [])
+            if item.get("key") == key
+        ]
+        tradegate_isin = (debug_map.get("tradegate") or {}).get(key)
+        bitfinex_symbols = [
+            sym for sym, keys in (debug_map.get("bitfinex") or {}).items() if key in (keys or [])
+        ]
+        return {
+            "key": key,
+            "priority": router._get_priority(key),
+            "best_price": router.best_prices.get(key),
+            "best_price_source": router.best_price_source.get(key),
+            "best_bid": router.best_bids.get(key),
+            "best_bid_source": router.best_bid_source.get(key),
+            "best_watch_price": router.best_watch_prices.get(key),
+            "best_watch_source": router.best_watch_source.get(key),
+            "sources": sources,
+            "mappings": {
+                "lightstreamer_items": ls_items,
+                "tradegate_isin": tradegate_isin,
+                "bitfinex_symbols": bitfinex_symbols,
+            },
+        }
+
+    return {
+        "default_priority": router.default_priority,
+        "known_sources": sorted(router.known_sources),
+        "source_stats": _build_source_stats(),
+        "priority_overrides": len(router.priority_by_key),
+        "mappings": stream_manager.debug_mappings,
+        "mappings_updated_at": stream_manager.debug_mappings_updated_at,
+        "best_prices": len(router.best_prices),
+        "best_bids": len(router.best_bids),
+        "best_watch_prices": len(router.best_watch_prices),
+    }
+
+
+@app.get("/api/debug/bitfinex")
+async def debug_bitfinex() -> Dict[str, Any]:
+    if not stream_manager.bitfinex_stream:
+        return {"enabled": False}
+    return stream_manager.bitfinex_stream.get_status()
 
 
 @app.get("/api/instruments")

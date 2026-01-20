@@ -88,6 +88,17 @@
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
+    pre.debug {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      max-height: 320px;
+      overflow: auto;
+      margin-top: 12px;
+    }
     @media (max-width: 900px) {
       header { align-items: flex-start; }
       .actions { width: 100%; justify-content: flex-start; }
@@ -253,6 +264,17 @@
           </table>
         </div>
       </section>
+
+      <section class="card span-2">
+        <h2>Debug</h2>
+        <div class="sub">Status der Kursquellen (z.B. Bitfinex)</div>
+        <div class="inline-form" style="margin-top: 12px;">
+          <input id="debugKey" placeholder="Instrument-Code (optional)" />
+          <button id="debugSourcesBtn" class="button ghost">Quellen-Status</button>
+          <button id="debugBitfinexBtn" class="button ghost">Bitfinex-Status</button>
+        </div>
+        <pre id="debugOutput" class="debug">{}</pre>
+      </section>
     </div>
   </div>
 
@@ -292,9 +314,16 @@
     const fxSourcesTbody = document.getElementById("fxSourcesTbody");
     const refreshFxSourcesBtn = document.getElementById("refreshFxSourcesBtn");
 
+    const debugKeyInput = document.getElementById("debugKey");
+    const debugSourcesBtn = document.getElementById("debugSourcesBtn");
+    const debugBitfinexBtn = document.getElementById("debugBitfinexBtn");
+    const debugOutput = document.getElementById("debugOutput");
+
     const state = {
       instruments: [],
+      instrumentById: {},
       fxRates: [],
+      fxById: {},
       instrumentSources: [],
       fxSources: [],
     };
@@ -308,6 +337,10 @@
       if (n === null || n === undefined) return "—";
       if (!isFinite(n)) return "—";
       return Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+    }
+
+    function renderDebug(data) {
+      debugOutput.textContent = JSON.stringify(data, null, 2);
     }
 
     async function api(path, options={}) {
@@ -642,15 +675,25 @@
 
     async function loadInstruments() {
       state.instruments = await api("/api/instruments");
+      state.instrumentById = {};
+      for (const inst of state.instruments) {
+        state.instrumentById[inst.id] = inst;
+      }
       renderInstruments();
       renderInstrumentSelect(sourceInstrumentSelect, state.instruments, sourceInstrumentSelect.value);
+      updateDebugKeyFromInstrument();
       await loadInstrumentSources();
     }
 
     async function loadFxRates() {
       state.fxRates = await api("/api/fx-rates");
+      state.fxById = {};
+      for (const fx of state.fxRates) {
+        state.fxById[fx.id] = fx;
+      }
       renderFxRates();
       renderFxSelect(sourceFxSelect, state.fxRates, sourceFxSelect.value);
+      updateDebugKeyFromFx();
       await loadFxSources();
     }
 
@@ -674,6 +717,36 @@
       }
       state.fxSources = await api(`/api/fx-rates/${fxId}/sources/quotes`);
       renderFxSources();
+    }
+
+    function updateDebugKeyFromInstrument() {
+      const instrumentId = Number(sourceInstrumentSelect.value);
+      const inst = state.instrumentById[instrumentId];
+      if (inst && inst.code) {
+        debugKeyInput.value = inst.code;
+      }
+    }
+
+    function updateDebugKeyFromFx() {
+      const fxId = Number(sourceFxSelect.value);
+      const fx = state.fxById[fxId];
+      if (fx && fx.code) {
+        debugKeyInput.value = fx.code;
+      }
+    }
+
+    async function loadDebugSources() {
+      const key = debugKeyInput.value.trim();
+      const path = key ? `/api/debug/quote-sources?key=${encodeURIComponent(key)}` : "/api/debug/quote-sources";
+      const data = await api(path);
+      renderDebug(data);
+      setStatus("success", "Debug-Daten geladen.");
+    }
+
+    async function loadDebugBitfinex() {
+      const data = await api("/api/debug/bitfinex");
+      renderDebug(data);
+      setStatus("success", "Bitfinex-Status geladen.");
     }
 
     async function createInstrument() {
@@ -780,8 +853,16 @@
     addFxSourceBtn.onclick = () => addFxSource().catch(e => setStatus("error", String(e.message || e)));
     refreshInstrumentSourcesBtn.onclick = () => loadInstrumentSources().catch(e => setStatus("error", String(e.message || e)));
     refreshFxSourcesBtn.onclick = () => loadFxSources().catch(e => setStatus("error", String(e.message || e)));
-    sourceInstrumentSelect.onchange = () => loadInstrumentSources().catch(e => setStatus("error", String(e.message || e)));
-    sourceFxSelect.onchange = () => loadFxSources().catch(e => setStatus("error", String(e.message || e)));
+    sourceInstrumentSelect.onchange = () => {
+      updateDebugKeyFromInstrument();
+      loadInstrumentSources().catch(e => setStatus("error", String(e.message || e)));
+    };
+    sourceFxSelect.onchange = () => {
+      updateDebugKeyFromFx();
+      loadFxSources().catch(e => setStatus("error", String(e.message || e)));
+    };
+    debugSourcesBtn.onclick = () => loadDebugSources().catch(e => setStatus("error", String(e.message || e)));
+    debugBitfinexBtn.onclick = () => loadDebugBitfinex().catch(e => setStatus("error", String(e.message || e)));
 
     Promise.all([loadInstruments(), loadFxRates()])
       .then(() => setStatus("success", "Bereit."))
