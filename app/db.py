@@ -151,26 +151,31 @@ def init_db(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
-    try:
-        conn.execute("UPDATE portfolios SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
-    except Exception:
-        pass
-    try:
-        conn.execute("UPDATE positions SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
-    except Exception:
-        pass
-    try:
-        conn.execute("UPDATE watchlist SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
-    except Exception:
-        pass
+    def _get_setting(key: str) -> Optional[str]:
+        row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        if not row:
+            return None
+        return str(row["value"])
 
     def _set_default_setting(key: str, value: Optional[str]) -> None:
         if value is None:
             return
-        row = conn.execute("SELECT 1 FROM app_settings WHERE key=?", (key,)).fetchone()
-        if row:
+        if _get_setting(key) is not None:
             return
         conn.execute("INSERT INTO app_settings(key, value) VALUES (?, ?)", (key, str(value)))
+
+    def _seed_sort_order(table: str, flag_key: str) -> None:
+        if _get_setting(flag_key) is not None:
+            return
+        try:
+            conn.execute(f"UPDATE {table} SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
+        except Exception:
+            return
+        _set_default_setting(flag_key, "true")
+
+    _seed_sort_order("portfolios", "portfolios_sort_seeded")
+    _seed_sort_order("positions", "positions_sort_seeded")
+    _seed_sort_order("watchlist", "watchlist_sort_seeded")
 
     ls_user_agent_default = (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -350,26 +355,37 @@ def init_db(conn: sqlite3.Connection) -> None:
         except Exception:
             pass
 
-    try:
-        instr_rows = conn.execute("SELECT id, code, isin, ls_item FROM instruments").fetchall()
-        for row in instr_rows:
-            if row["ls_item"]:
-                _add_source("instrument_sources", row["id"], "lightstreamer", row["ls_item"], 10)
-            if row["isin"]:
-                _add_source("instrument_sources", row["id"], "lightstreamer", row["isin"], 20)
-                _add_source("instrument_sources", row["id"], "tradegate", row["isin"], 30)
-    except Exception:
-        pass
+    def _seed_sources_once() -> None:
+        if _get_setting("sources_seeded") is not None:
+            return
+        has_sources = conn.execute("SELECT 1 FROM instrument_sources LIMIT 1").fetchone()
+        has_fx_sources = conn.execute("SELECT 1 FROM fx_rate_sources LIMIT 1").fetchone()
+        if has_sources or has_fx_sources:
+            _set_default_setting("sources_seeded", "true")
+            return
+        try:
+            instr_rows = conn.execute("SELECT id, code, isin, ls_item FROM instruments").fetchall()
+            for row in instr_rows:
+                if row["ls_item"]:
+                    _add_source("instrument_sources", row["id"], "lightstreamer", row["ls_item"], 10)
+                if row["isin"]:
+                    _add_source("instrument_sources", row["id"], "lightstreamer", row["isin"], 20)
+                    _add_source("instrument_sources", row["id"], "tradegate", row["isin"], 30)
+        except Exception:
+            pass
 
-    try:
-        fx_rows = conn.execute("SELECT id, code, isin, ls_item FROM fx_rates").fetchall()
-        for row in fx_rows:
-            if row["ls_item"]:
-                _add_source("fx_rate_sources", row["id"], "lightstreamer", row["ls_item"], 10)
-            if row["isin"]:
-                _add_source("fx_rate_sources", row["id"], "lightstreamer", row["isin"], 20)
-                _add_source("fx_rate_sources", row["id"], "tradegate", row["isin"], 30)
-    except Exception:
-        pass
+        try:
+            fx_rows = conn.execute("SELECT id, code, isin, ls_item FROM fx_rates").fetchall()
+            for row in fx_rows:
+                if row["ls_item"]:
+                    _add_source("fx_rate_sources", row["id"], "lightstreamer", row["ls_item"], 10)
+                if row["isin"]:
+                    _add_source("fx_rate_sources", row["id"], "lightstreamer", row["isin"], 20)
+                    _add_source("fx_rate_sources", row["id"], "tradegate", row["isin"], 30)
+        except Exception:
+            pass
+        _set_default_setting("sources_seeded", "true")
+
+    _seed_sources_once()
 
     conn.commit()
