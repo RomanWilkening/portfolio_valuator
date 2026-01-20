@@ -6,7 +6,7 @@ import re
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 SOURCE_LIGHTSTREAMER = "lightstreamer"
 SOURCE_TRADEGATE = "tradegate"
