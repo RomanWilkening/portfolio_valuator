@@ -73,6 +73,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
           currency TEXT NOT NULL DEFAULT 'EUR',
+          sort_order INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
 
@@ -85,6 +86,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           quantity REAL NOT NULL,
           entry_price REAL NOT NULL,
           currency TEXT NOT NULL DEFAULT 'EUR',
+          sort_order INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE,
           FOREIGN KEY (instrument_id) REFERENCES instruments(id) ON DELETE SET NULL,
@@ -97,6 +99,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           instrument_id INTEGER,
           isin TEXT NOT NULL UNIQUE,
           currency TEXT NOT NULL DEFAULT 'EUR',
+          sort_order INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           FOREIGN KEY (instrument_id) REFERENCES instruments(id) ON DELETE SET NULL
         );
@@ -123,6 +126,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     _add_column("positions", "instrument_id", "instrument_id INTEGER")
     _add_column("positions", "name", "name TEXT")
     _add_column("watchlist", "instrument_id", "instrument_id INTEGER")
+    _add_column("portfolios", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
+    _add_column("positions", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
+    _add_column("watchlist", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
 
     # Minimal-"Migrationen" für bestehende DBs (ALTER TABLE wenn Spalte fehlt)
     try:
@@ -141,6 +147,19 @@ def init_db(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
         if "currency" not in cols:
             conn.execute("ALTER TABLE positions ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR';")
+    except Exception:
+        pass
+
+    try:
+        conn.execute("UPDATE portfolios SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
+    except Exception:
+        pass
+    try:
+        conn.execute("UPDATE positions SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
+    except Exception:
+        pass
+    try:
+        conn.execute("UPDATE watchlist SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0;")
     except Exception:
         pass
 

@@ -151,6 +151,8 @@
       letter-spacing: 0.05em;
     }
     .muted { color: var(--muted); }
+    .drag-handle { cursor: grab; color: var(--muted); font-weight: 700; }
+    tr.dragging { opacity: 0.5; }
     body.nav-collapsed .sidebar { width: var(--nav-collapsed); }
     body.nav-collapsed .nav-text,
     body.nav-collapsed .brand-title,
@@ -205,6 +207,7 @@
               <table>
                 <thead>
                   <tr>
+                    <th></th>
                     <th>Name</th>
                     <th>Waehrung</th>
                     <th class="num">Positionen</th>
@@ -329,6 +332,54 @@
       return await res.text();
     }
 
+    function getDragAfterElement(container, y) {
+      const els = [...container.querySelectorAll("tr:not(.dragging)")];
+      return els.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        const offset = y - box.top - box.height / 2;
+        if (offset < 0 && offset > closest.offset) {
+          return { offset, element: child };
+        }
+        return closest;
+      }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+
+    function setupRowDrag(tbody, onReorder) {
+      let dragging = null;
+      tbody.addEventListener("dragstart", (e) => {
+        const handle = e.target.closest(".drag-handle");
+        if (!handle) return;
+        const tr = e.target.closest("tr");
+        if (!tr) return;
+        dragging = tr;
+        tr.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+      });
+      tbody.addEventListener("dragend", () => {
+        if (dragging) dragging.classList.remove("dragging");
+        dragging = null;
+      });
+      tbody.addEventListener("dragover", (e) => {
+        if (!dragging) return;
+        e.preventDefault();
+        const after = getDragAfterElement(tbody, e.clientY);
+        if (after == null) {
+          tbody.appendChild(dragging);
+        } else {
+          tbody.insertBefore(dragging, after);
+        }
+      });
+      tbody.addEventListener("drop", async () => {
+        if (!dragging) return;
+        const ids = [...tbody.querySelectorAll("tr")]
+          .map(row => Number(row.dataset.id))
+          .filter(Boolean);
+        if (ids.length) {
+          await onReorder(ids);
+        }
+      });
+    }
+
     function renderInstrumentSelect(select, instruments, selectedId) {
       select.innerHTML = "";
       const placeholder = document.createElement("option");
@@ -350,11 +401,19 @@
       activePortfolioSelect.innerHTML = "";
       for (const pf of state.portfolios) {
         const tr = document.createElement("tr");
+        tr.dataset.id = String(pf.id);
+        const tdDrag = document.createElement("td");
         const tdName = document.createElement("td");
         const tdCurr = document.createElement("td");
         const tdCount = document.createElement("td");
         const tdActions = document.createElement("td");
         tdCount.className = "num";
+
+        const dragHandle = document.createElement("span");
+        dragHandle.className = "drag-handle";
+        dragHandle.textContent = "⋮⋮";
+        dragHandle.draggable = true;
+        tdDrag.appendChild(dragHandle);
 
         const nameInput = document.createElement("input");
         nameInput.value = pf.name || "";
@@ -403,6 +462,7 @@
         tdCurr.appendChild(currSelect);
         tdActions.appendChild(delBtn);
 
+        tr.appendChild(tdDrag);
         tr.appendChild(tdName);
         tr.appendChild(tdCurr);
         tr.appendChild(tdCount);
@@ -545,6 +605,16 @@
       setStatus("success", "Portfolio angelegt.");
     }
 
+    async function savePortfolioOrder(ids) {
+      setStatus("info", "Speichere Sortierung...");
+      await api("/api/portfolios/order", {
+        method: "PUT",
+        body: JSON.stringify({ ids }),
+      });
+      await loadPortfolios();
+      setStatus("success", "Sortierung gespeichert.");
+    }
+
     function scheduleSavePositions() {
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
@@ -622,6 +692,8 @@
       const inst = state.instruments.find(i => String(i.id) === String(newPositionInstrument.value));
       if (inst && inst.currency) newPositionCurrency.value = inst.currency;
     };
+
+    setupRowDrag(portfoliosTbody, savePortfolioOrder);
 
     Promise.all([loadInstruments(), loadPortfolios()])
       .then(() => setStatus("success", "Bereit."))

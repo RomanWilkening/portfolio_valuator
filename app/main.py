@@ -404,7 +404,7 @@ class LightstreamerSession:
 
 
 def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dict]], list[str]]:
-    cur = conn.execute("SELECT id, name, currency FROM portfolios ORDER BY id DESC")
+    cur = conn.execute("SELECT id, name, currency FROM portfolios ORDER BY sort_order ASC, id ASC")
     portfolios = [dict(r) for r in cur.fetchall()]
     cur2 = conn.execute(
         """
@@ -423,7 +423,7 @@ def _load_portfolios_and_positions(conn) -> tuple[list[dict], dict[int, list[dic
             instr.ls_item AS instrument_ls_item
         FROM positions pos
         JOIN instruments instr ON instr.id = pos.instrument_id
-        ORDER BY pos.portfolio_id DESC, pos.id ASC
+        ORDER BY pos.portfolio_id DESC, pos.sort_order ASC, pos.id ASC
         """
     )
     positions_all = [dict(r) for r in cur2.fetchall()]
@@ -484,7 +484,7 @@ def load_watchlist(conn) -> List[Dict[str, Any]]:
             instr.ls_item AS instrument_ls_item
         FROM watchlist w
         JOIN instruments instr ON instr.id = w.instrument_id
-        ORDER BY w.id DESC
+        ORDER BY w.sort_order ASC, w.id ASC
         """
     )
     return [dict(r) for r in cur.fetchall()]
@@ -1339,12 +1339,16 @@ class FxRateUpdate(BaseModel):
 class SourceCreate(BaseModel):
     source: str = Field(min_length=1, max_length=32)
     source_code: str = Field(min_length=1, max_length=128)
-    priority: int = Field(default=100, ge=0, le=1000)
+    priority: Optional[int] = Field(default=None, ge=0, le=1000)
 
 
 class SourceUpdate(BaseModel):
     source_code: Optional[str] = Field(default=None, min_length=1, max_length=128)
     priority: Optional[int] = Field(default=None, ge=0, le=1000)
+
+
+class OrderUpdate(BaseModel):
+    ids: List[int] = Field(default_factory=list)
 
 
 class PositionIn(BaseModel):
@@ -1747,10 +1751,17 @@ async def add_instrument_source(instrument_id: int, body: SourceCreate) -> Dict[
     _get_instrument(instrument_id)
     source = _normalize_source(body.source)
     source_code = _normalize_source_code(body.source_code)
+    priority = body.priority
+    if priority is None:
+        max_row = _conn.execute(
+            "SELECT COALESCE(MAX(priority), -1) AS max_priority FROM instrument_sources WHERE instrument_id=?",
+            (instrument_id,),
+        ).fetchone()
+        priority = int(max_row["max_priority"] if max_row else -1) + 1
     try:
         cur = _conn.execute(
             "INSERT INTO instrument_sources(instrument_id, source, source_code, priority) VALUES (?,?,?,?)",
-            (instrument_id, source, source_code, body.priority),
+            (instrument_id, source, source_code, priority),
         )
         _conn.commit()
     except Exception as e:
@@ -1761,7 +1772,7 @@ async def add_instrument_source(instrument_id: int, body: SourceCreate) -> Dict[
         "id": int(cur.lastrowid),
         "source": source,
         "source_code": source_code,
-        "priority": body.priority,
+        "priority": priority,
     }
 
 
@@ -1799,6 +1810,31 @@ async def update_instrument_source(instrument_id: int, source_id: int, body: Sou
         (source_id,),
     ).fetchone()
     return dict(out)
+
+
+@app.put("/api/instruments/{instrument_id}/sources/order")
+async def reorder_instrument_sources(instrument_id: int, body: OrderUpdate) -> List[Dict[str, Any]]:
+    _get_instrument(instrument_id)
+    ids = [int(i) for i in (body.ids or []) if i]
+    if not ids:
+        return []
+    rows = _conn.execute(
+        "SELECT id FROM instrument_sources WHERE instrument_id=?",
+        (instrument_id,),
+    ).fetchall()
+    existing = {int(r["id"]) for r in rows}
+    missing = [i for i in ids if i not in existing]
+    if missing:
+        raise HTTPException(status_code=400, detail="Kursquelle nicht gefunden")
+    with _conn:
+        for idx, source_id in enumerate(ids):
+            _conn.execute(
+                "UPDATE instrument_sources SET priority=? WHERE id=? AND instrument_id=?",
+                (idx, source_id, instrument_id),
+            )
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return await list_instrument_sources(instrument_id)
 
 
 @app.delete("/api/instruments/{instrument_id}/sources/{source_id}", status_code=204)
@@ -1952,10 +1988,17 @@ async def add_fx_rate_source(fx_id: int, body: SourceCreate) -> Dict[str, Any]:
     _get_fx_rate(fx_id)
     source = _normalize_source(body.source)
     source_code = _normalize_source_code(body.source_code)
+    priority = body.priority
+    if priority is None:
+        max_row = _conn.execute(
+            "SELECT COALESCE(MAX(priority), -1) AS max_priority FROM fx_rate_sources WHERE fx_rate_id=?",
+            (fx_id,),
+        ).fetchone()
+        priority = int(max_row["max_priority"] if max_row else -1) + 1
     try:
         cur = _conn.execute(
             "INSERT INTO fx_rate_sources(fx_rate_id, source, source_code, priority) VALUES (?,?,?,?)",
-            (fx_id, source, source_code, body.priority),
+            (fx_id, source, source_code, priority),
         )
         _conn.commit()
     except Exception as e:
@@ -1966,7 +2009,7 @@ async def add_fx_rate_source(fx_id: int, body: SourceCreate) -> Dict[str, Any]:
         "id": int(cur.lastrowid),
         "source": source,
         "source_code": source_code,
-        "priority": body.priority,
+        "priority": priority,
     }
 
 
@@ -2006,6 +2049,31 @@ async def update_fx_rate_source(fx_id: int, source_id: int, body: SourceUpdate) 
     return dict(out)
 
 
+@app.put("/api/fx-rates/{fx_id}/sources/order")
+async def reorder_fx_rate_sources(fx_id: int, body: OrderUpdate) -> List[Dict[str, Any]]:
+    _get_fx_rate(fx_id)
+    ids = [int(i) for i in (body.ids or []) if i]
+    if not ids:
+        return []
+    rows = _conn.execute(
+        "SELECT id FROM fx_rate_sources WHERE fx_rate_id=?",
+        (fx_id,),
+    ).fetchall()
+    existing = {int(r["id"]) for r in rows}
+    missing = [i for i in ids if i not in existing]
+    if missing:
+        raise HTTPException(status_code=400, detail="Kursquelle nicht gefunden")
+    with _conn:
+        for idx, source_id in enumerate(ids):
+            _conn.execute(
+                "UPDATE fx_rate_sources SET priority=? WHERE id=? AND fx_rate_id=?",
+                (idx, source_id, fx_id),
+            )
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return await list_fx_rate_sources(fx_id)
+
+
 @app.delete("/api/fx-rates/{fx_id}/sources/{source_id}", status_code=204)
 async def delete_fx_rate_source(fx_id: int, source_id: int) -> None:
     _get_fx_rate(fx_id)
@@ -2029,17 +2097,37 @@ async def list_portfolios() -> List[Dict[str, Any]]:
         FROM portfolios p
         LEFT JOIN positions pos ON pos.portfolio_id = p.id
         GROUP BY p.id
-        ORDER BY p.id DESC
+        ORDER BY p.sort_order ASC, p.id ASC
         """
     )
     return [dict(r) for r in cur.fetchall()]
 
 
+@app.put("/api/portfolios/order")
+async def reorder_portfolios(body: OrderUpdate) -> List[Dict[str, Any]]:
+    ids = [int(i) for i in (body.ids or []) if i]
+    if not ids:
+        return []
+    rows = _conn.execute("SELECT id FROM portfolios").fetchall()
+    existing = {int(r["id"]) for r in rows}
+    missing = [i for i in ids if i not in existing]
+    if missing:
+        raise HTTPException(status_code=400, detail="Portfolio nicht gefunden")
+    with _conn:
+        for idx, pid in enumerate(ids):
+            _conn.execute("UPDATE portfolios SET sort_order=? WHERE id=?", (idx, pid))
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return await list_portfolios()
+
+
 @app.post("/api/portfolios", status_code=201)
 async def create_portfolio(body: PortfolioCreate) -> PortfolioOut:
+    max_row = _conn.execute("SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM portfolios").fetchone()
+    next_order = int(max_row["max_order"] if max_row else -1) + 1
     cur = _conn.execute(
-        "INSERT INTO portfolios(name, currency) VALUES (?, ?)",
-        (body.name.strip(), (body.currency or "EUR").strip().upper()),
+        "INSERT INTO portfolios(name, currency, sort_order) VALUES (?, ?, ?)",
+        (body.name.strip(), (body.currency or "EUR").strip().upper(), next_order),
     )
     _conn.commit()
     stream_manager.mark_dirty()
@@ -2052,15 +2140,35 @@ async def list_watchlist() -> List[Dict[str, Any]]:
     return load_watchlist(_conn)
 
 
+@app.put("/api/watchlist/order")
+async def reorder_watchlist(body: OrderUpdate) -> List[Dict[str, Any]]:
+    ids = [int(i) for i in (body.ids or []) if i]
+    if not ids:
+        return []
+    rows = _conn.execute("SELECT id FROM watchlist").fetchall()
+    existing = {int(r["id"]) for r in rows}
+    missing = [i for i in ids if i not in existing]
+    if missing:
+        raise HTTPException(status_code=400, detail="Watchlist-Eintrag nicht gefunden")
+    with _conn:
+        for idx, wid in enumerate(ids):
+            _conn.execute("UPDATE watchlist SET sort_order=? WHERE id=?", (idx, wid))
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return load_watchlist(_conn)
+
+
 @app.post("/api/watchlist", status_code=201)
 async def add_watchlist_item(body: WatchItemCreate) -> Dict[str, Any]:
     instrument = _get_instrument(body.instrument_id)
     label = (body.label or "").strip() or None
     currency = _normalize_currency(body.currency, default=instrument.get("currency") or "EUR")
+    max_row = _conn.execute("SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM watchlist").fetchone()
+    next_order = int(max_row["max_order"] if max_row else -1) + 1
     try:
         cur = _conn.execute(
-            "INSERT INTO watchlist(instrument_id, isin, label, currency) VALUES (?,?,?,?)",
-            (instrument["id"], instrument["code"], label, currency),
+            "INSERT INTO watchlist(instrument_id, isin, label, currency, sort_order) VALUES (?,?,?,?,?)",
+            (instrument["id"], instrument["code"], label, currency, next_order),
         )
         _conn.commit()
     except Exception as e:
@@ -2157,7 +2265,7 @@ async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
         FROM positions pos
         JOIN instruments instr ON instr.id = pos.instrument_id
         WHERE pos.portfolio_id=?
-        ORDER BY pos.id ASC
+        ORDER BY pos.sort_order ASC, pos.id ASC
         """,
         (portfolio_id,),
     )
@@ -2219,9 +2327,9 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
 
     with _conn:
         _conn.execute("DELETE FROM positions WHERE portfolio_id=?", (portfolio_id,))
-        for p in cleaned:
+        for idx, p in enumerate(cleaned):
             _conn.execute(
-                "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency, sort_order) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     portfolio_id,
                     p["instrument_id"],
@@ -2230,6 +2338,7 @@ async def replace_positions(portfolio_id: int, positions: List[PositionIn]) -> D
                     p["quantity"],
                     p["entry_price"],
                     p["currency"],
+                    idx,
                 ),
             )
 
@@ -2284,7 +2393,7 @@ async def value_portfolio(portfolio_id: int) -> Dict[str, Any]:
         FROM positions pos
         JOIN instruments instr ON instr.id = pos.instrument_id
         WHERE pos.portfolio_id=?
-        ORDER BY pos.id ASC
+        ORDER BY pos.sort_order ASC, pos.id ASC
         """,
         (portfolio_id,),
     )
