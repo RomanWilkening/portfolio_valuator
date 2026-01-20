@@ -181,6 +181,7 @@
         <a class="nav-item" href="/sources" title="Kursquellen"><span class="nav-icon">K</span><span class="nav-text">Kursquellen</span></a>
         <a class="nav-item" href="/watchlist" title="Watchlist"><span class="nav-icon">W</span><span class="nav-text">Watchlist</span></a>
         <a class="nav-item active" href="/positions" title="Positionen"><span class="nav-icon">P</span><span class="nav-text">Positionen</span></a>
+        <a class="nav-item" href="/settings" title="Einstellungen"><span class="nav-icon">E</span><span class="nav-text">Einstellungen</span></a>
       </nav>
       <div class="nav-footer">Portfolios & Positionen</div>
     </aside>
@@ -267,18 +268,6 @@
             </div>
           </section>
 
-          <section class="card">
-            <h2>MQTT (Home Assistant)</h2>
-            <div class="sub">Verbindungsdaten aus config/app.env</div>
-            <div class="inline-form" style="margin-top: 12px;">
-              <span class="pill">Status: <strong id="mqttStatus">—</strong></span>
-              <button id="mqttToggleBtn" class="button">MQTT einschalten</button>
-              <button id="mqttReloadBtn" class="button ghost">Neu laden</button>
-            </div>
-            <div class="sub" style="margin-top: 10px;">
-              Availability Topic: <code id="mqttAvailability">—</code>
-            </div>
-          </section>
         </div>
       </div>
     </main>
@@ -312,11 +301,6 @@
     const newPositionEntry = document.getElementById("newPositionEntry");
     const newPositionCurrency = document.getElementById("newPositionCurrency");
     const addPositionBtn = document.getElementById("addPositionBtn");
-
-    const mqttStatusEl = document.getElementById("mqttStatus");
-    const mqttToggleBtn = document.getElementById("mqttToggleBtn");
-    const mqttReloadBtn = document.getElementById("mqttReloadBtn");
-    const mqttAvailabilityEl = document.getElementById("mqttAvailability");
 
     const state = {
       instruments: [],
@@ -631,39 +615,15 @@
       scheduleSavePositions();
     }
 
-    async function loadMqttStatus() {
-      const s = await api("/api/mqtt");
-      const enabled = !!s.enabled;
-      const connected = !!s.connected;
-      const host = s.host || "";
-      mqttStatusEl.textContent = enabled
-        ? (connected ? `an (verbunden: ${host})` : `an (nicht verbunden: ${host || "MQTT_HOST fehlt"})`)
-        : "aus";
-      mqttToggleBtn.textContent = enabled ? "MQTT ausschalten" : "MQTT einschalten";
-      mqttAvailabilityEl.textContent = s.availability_topic || "—";
-      return s;
-    }
-
-    async function toggleMqtt() {
-      const s = await api("/api/mqtt");
-      const next = !s.enabled;
-      setStatus("info", next ? "Schalte MQTT ein..." : "Schalte MQTT aus...");
-      await api("/api/mqtt/enabled", { method: "PUT", body: JSON.stringify({ enabled: next }) });
-      await loadMqttStatus();
-      setStatus("success", next ? "MQTT ist an." : "MQTT ist aus.");
-    }
-
     createPortfolioBtn.onclick = () => createPortfolio().catch(e => setStatus("error", String(e.message || e)));
     activePortfolioSelect.onchange = () => loadPortfolio(Number(activePortfolioSelect.value)).catch(e => setStatus("error", String(e.message || e)));
     addPositionBtn.onclick = () => addPosition().catch(e => setStatus("error", String(e.message || e)));
-    mqttReloadBtn.onclick = () => loadMqttStatus().catch(e => setStatus("error", String(e.message || e)));
-    mqttToggleBtn.onclick = () => toggleMqtt().catch(e => setStatus("error", String(e.message || e)));
     newPositionInstrument.onchange = () => {
       const inst = state.instruments.find(i => String(i.id) === String(newPositionInstrument.value));
       if (inst && inst.currency) newPositionCurrency.value = inst.currency;
     };
 
-    Promise.all([loadInstruments(), loadPortfolios(), loadMqttStatus()])
+    Promise.all([loadInstruments(), loadPortfolios()])
       .then(() => setStatus("success", "Bereit."))
       .catch(e => setStatus("error", String(e.message || e)));
   </script>

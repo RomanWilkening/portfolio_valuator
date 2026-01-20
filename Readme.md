@@ -35,6 +35,7 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 - Kursquellen: `http://localhost:8000/sources`
 - Watchlist: `http://localhost:8000/watchlist`
 - Positionen: `http://localhost:8000/positions`
+- Einstellungen: `http://localhost:8000/settings`
 
 ### Datenmodell (Instrumente)
 

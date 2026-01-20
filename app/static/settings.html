@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Kursquellen</title>
+  <title>Einstellungen</title>
   <style>
     :root {
       color-scheme: light;
@@ -89,6 +89,19 @@
     h1 { margin: 0; font-size: 28px; }
     h2 { margin: 0 0 6px 0; font-size: 20px; }
     .sub { color: var(--muted); font-size: 14px; }
+    .button {
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .button.ghost {
+      background: transparent;
+      color: var(--accent);
+    }
     .card {
       background: var(--card);
       border: 1px solid var(--line);
@@ -96,7 +109,6 @@
       padding: 16px;
       box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
     }
-    .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .status {
       margin-top: 12px;
       padding: 10px 12px;
@@ -107,11 +119,7 @@
     .status.success { background: #e7f7ea; color: #1f6f3a; }
     .status.warn { background: #fff2dc; color: #8a5a17; }
     .status.error { background: #ffe7ea; color: #8f1d2f; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
-    th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .pill {
       display: inline-block;
       padding: 4px 10px;
@@ -147,46 +155,35 @@
       <nav class="nav">
         <a class="nav-item" href="/" title="Uebersicht"><span class="nav-icon">U</span><span class="nav-text">Uebersicht</span></a>
         <a class="nav-item" href="/instruments" title="Instrumente"><span class="nav-icon">I</span><span class="nav-text">Instrumente</span></a>
-        <a class="nav-item active" href="/sources" title="Kursquellen"><span class="nav-icon">K</span><span class="nav-text">Kursquellen</span></a>
+        <a class="nav-item" href="/sources" title="Kursquellen"><span class="nav-icon">K</span><span class="nav-text">Kursquellen</span></a>
         <a class="nav-item" href="/watchlist" title="Watchlist"><span class="nav-icon">W</span><span class="nav-text">Watchlist</span></a>
         <a class="nav-item" href="/positions" title="Positionen"><span class="nav-icon">P</span><span class="nav-text">Positionen</span></a>
-        <a class="nav-item" href="/settings" title="Einstellungen"><span class="nav-icon">E</span><span class="nav-text">Einstellungen</span></a>
+        <a class="nav-item active" href="/settings" title="Einstellungen"><span class="nav-icon">E</span><span class="nav-text">Einstellungen</span></a>
       </nav>
-      <div class="nav-footer">Status & Optionen</div>
+      <div class="nav-footer">Allgemeine Optionen</div>
     </aside>
     <main class="main">
       <div class="container">
         <header>
           <div>
-            <div class="sub">Verwaltung</div>
-            <h1>Kursquellen</h1>
-            <div class="sub">Status und Optionen je Quelle (Ausbau folgt)</div>
+            <div class="sub">Allgemein</div>
+            <h1>Einstellungen</h1>
+            <div class="sub">Systemweite Optionen</div>
           </div>
         </header>
 
         <div id="status" class="status info">Lade...</div>
 
         <section class="card" style="margin-top: 16px;">
-          <div class="inline-form" style="justify-content: space-between; align-items: center;">
-            <div>
-              <h2>Quellenstatus</h2>
-              <div class="sub">Auto-Refresh alle 10s</div>
-            </div>
-            <span class="pill">letztes Update: <span id="updatedAt">—</span></span>
+          <h2>MQTT (Home Assistant)</h2>
+          <div class="sub">Verbindungsdaten aus config/app.env</div>
+          <div class="inline-form" style="margin-top: 12px;">
+            <span class="pill">Status: <strong id="mqttStatus">—</strong></span>
+            <button id="mqttToggleBtn" class="button">MQTT einschalten</button>
+            <button id="mqttReloadBtn" class="button ghost">Neu laden</button>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Quelle</th>
-                  <th>Status</th>
-                  <th class="num">Preise</th>
-                  <th class="num">Updates</th>
-                  <th>Mapping</th>
-                </tr>
-              </thead>
-              <tbody id="sourcesTbody"></tbody>
-            </table>
+          <div class="sub" style="margin-top: 10px;">
+            Availability Topic: <code id="mqttAvailability">—</code>
           </div>
         </section>
       </div>
@@ -195,8 +192,6 @@
 
   <script>
     const statusEl = document.getElementById("status");
-    const sourcesTbody = document.getElementById("sourcesTbody");
-    const updatedAtEl = document.getElementById("updatedAt");
     const navToggle = document.getElementById("navToggle");
     const storedNav = localStorage.getItem("pv_nav_collapsed");
     if (storedNav === "1") document.body.classList.add("nav-collapsed");
@@ -209,6 +204,11 @@
         );
       };
     }
+
+    const mqttStatusEl = document.getElementById("mqttStatus");
+    const mqttToggleBtn = document.getElementById("mqttToggleBtn");
+    const mqttReloadBtn = document.getElementById("mqttReloadBtn");
+    const mqttAvailabilityEl = document.getElementById("mqttAvailability");
 
     function setStatus(level, message) {
       statusEl.className = "status " + level;
@@ -226,74 +226,34 @@
       return await res.text();
     }
 
-    function fmtNum(n) {
-      if (n === null || n === undefined) return "—";
-      if (!isFinite(n)) return "—";
-      return Number(n).toLocaleString();
+    async function loadMqttStatus() {
+      const s = await api("/api/mqtt");
+      const enabled = !!s.enabled;
+      const connected = !!s.connected;
+      const host = s.host || "";
+      mqttStatusEl.textContent = enabled
+        ? (connected ? `an (verbunden: ${host})` : `an (nicht verbunden: ${host || "MQTT_HOST fehlt"})`)
+        : "aus";
+      mqttToggleBtn.textContent = enabled ? "MQTT ausschalten" : "MQTT einschalten";
+      mqttAvailabilityEl.textContent = s.availability_topic || "—";
+      return s;
     }
 
-    async function loadSources() {
-      const [debug, bitfinex] = await Promise.all([
-        api("/api/debug/quote-sources"),
-        api("/api/debug/bitfinex"),
-      ]);
-      const sources = debug.known_sources || Object.keys(debug.source_stats || {});
-      const stats = debug.source_stats || {};
-      const mappings = debug.mappings || {};
-      sourcesTbody.innerHTML = "";
-      for (const src of sources) {
-        const row = document.createElement("tr");
-        const tdName = document.createElement("td");
-        const tdStatus = document.createElement("td");
-        const tdPrices = document.createElement("td");
-        const tdUpdates = document.createElement("td");
-        const tdMapping = document.createElement("td");
-        tdPrices.className = "num";
-        tdUpdates.className = "num";
-
-        tdName.textContent = src;
-        const stat = stats[src] || {};
-        tdPrices.textContent = fmtNum(stat.prices || 0);
-        tdUpdates.textContent = fmtNum(stat.last_updates || 0);
-
-        let status = "—";
-        let mapping = "—";
-        if (src === "bitfinex") {
-          status = bitfinex.status || (bitfinex.enabled ? "enabled" : "disabled");
-          const symbols = (bitfinex.subscribed_symbols || []).length;
-          const acked = (bitfinex.acked_symbols || []).length;
-          mapping = `symbole: ${symbols} (ack: ${acked})`;
-        } else if (src === "tradegate") {
-          const cnt = Object.keys(mappings.tradegate || {}).length;
-          mapping = `isin: ${cnt}`;
-        } else if (src === "lightstreamer") {
-          const cnt = (mappings.lightstreamer || []).length;
-          mapping = `items: ${cnt}`;
-        }
-        tdStatus.textContent = status;
-        tdMapping.textContent = mapping;
-
-        row.appendChild(tdName);
-        row.appendChild(tdStatus);
-        row.appendChild(tdPrices);
-        row.appendChild(tdUpdates);
-        row.appendChild(tdMapping);
-        sourcesTbody.appendChild(row);
-      }
-      updatedAtEl.textContent = new Date().toLocaleTimeString();
+    async function toggleMqtt() {
+      const s = await api("/api/mqtt");
+      const next = !s.enabled;
+      setStatus("info", next ? "Schalte MQTT ein..." : "Schalte MQTT aus...");
+      await api("/api/mqtt/enabled", { method: "PUT", body: JSON.stringify({ enabled: next }) });
+      await loadMqttStatus();
+      setStatus("success", next ? "MQTT ist an." : "MQTT ist aus.");
     }
 
-    async function refreshLoop() {
-      try {
-        await loadSources();
-        setStatus("success", "Aktualisiert.");
-      } catch (e) {
-        setStatus("error", String(e.message || e));
-      }
-    }
+    mqttReloadBtn.onclick = () => loadMqttStatus().catch(e => setStatus("error", String(e.message || e)));
+    mqttToggleBtn.onclick = () => toggleMqtt().catch(e => setStatus("error", String(e.message || e)));
 
-    refreshLoop();
-    setInterval(refreshLoop, 10000);
+    loadMqttStatus()
+      .then(() => setStatus("success", "Bereit."))
+      .catch(e => setStatus("error", String(e.message || e)));
   </script>
 </body>
 </html>

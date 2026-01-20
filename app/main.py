@@ -1516,6 +1516,11 @@ async def sources_page():
     return FileResponse("app/static/sources.html")
 
 
+@app.get("/settings")
+async def settings_page():
+    return FileResponse("app/static/settings.html")
+
+
 @app.get("/instruments")
 async def instruments_page():
     return FileResponse("app/static/instruments.html")
