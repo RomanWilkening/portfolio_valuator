@@ -105,29 +105,6 @@ def is_ls_item(code: str) -> bool:
     return bool(re.fullmatch(r"X[0-9A-Z]{6,32}", (code or "").strip().upper()))
 
 
-def instrument_to_ls_item(instr: Dict[str, Any]) -> Optional[str]:
-    ls_item = (instr.get("ls_item") or "").strip()
-    if ls_item:
-        return ls_item
-    isin = (instr.get("isin") or "").strip().upper()
-    if is_isin(isin):
-        return isin_to_item(isin)
-    code = (instr.get("code") or instr.get("instrument_code") or "").strip().upper()
-    if is_isin(code):
-        return isin_to_item(code)
-    if is_ls_item(code):
-        return code
-    return None
-
-
-def instrument_to_tradegate_isin(instr: Dict[str, Any]) -> Optional[str]:
-    isin = (instr.get("isin") or "").strip().upper()
-    if is_isin(isin):
-        return isin
-    code = (instr.get("code") or instr.get("instrument_code") or "").strip().upper()
-    if is_isin(code):
-        return code
-    return None
 
 
 def isin_to_item(isin: str) -> str:
@@ -515,6 +492,61 @@ def load_fx_rates(conn) -> List[Dict[str, Any]]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def load_instrument_sources(conn) -> List[Dict[str, Any]]:
+    cur = conn.execute(
+        """
+        SELECT
+            s.id,
+            s.instrument_id,
+            s.source,
+            s.source_code,
+            s.priority,
+            i.code AS instrument_code
+        FROM instrument_sources s
+        JOIN instruments i ON i.id = s.instrument_id
+        ORDER BY s.instrument_id, s.priority ASC, s.id ASC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_fx_rate_sources(conn) -> List[Dict[str, Any]]:
+    cur = conn.execute(
+        """
+        SELECT
+            s.id,
+            s.fx_rate_id,
+            s.source,
+            s.source_code,
+            s.priority,
+            fx.code AS fx_code
+        FROM fx_rate_sources s
+        JOIN fx_rates fx ON fx.id = s.fx_rate_id
+        ORDER BY s.fx_rate_id, s.priority ASC, s.id ASC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def build_priority_map(source_rows: List[Dict[str, Any]], key_field: str) -> Dict[str, List[str]]:
+    priorities: Dict[str, List[str]] = {}
+    for row in source_rows:
+        key = row.get(key_field)
+        if not key:
+            continue
+        priorities.setdefault(str(key), []).append(str(row.get("source") or "").lower())
+    return priorities
+
+
+def ls_source_to_item(source_code: str) -> Optional[str]:
+    code = (source_code or "").strip()
+    if not code:
+        return None
+    if is_isin(code):
+        return isin_to_item(code)
+    return code
+
+
 def load_stream_instruments(conn) -> List[Dict[str, Any]]:
     cur = conn.execute(
         """
@@ -770,23 +802,38 @@ class StreamManager:
 
                 instruments = load_stream_instruments(_conn)
                 self.instrument_by_code = {i["code"]: i for i in instruments if i.get("code")}
+                instrument_sources = load_instrument_sources(_conn)
+                fx_sources = load_fx_rate_sources(_conn)
+                all_sources: List[Dict[str, Any]] = instrument_sources + fx_sources
 
-                # Targets: (ls_item, key). key bleibt stabil fürs Frontend (Instrument-Code).
+                priorities = build_priority_map(instrument_sources, "instrument_code")
+                fx_priorities = build_priority_map(fx_sources, "fx_code")
+                for key, items in fx_priorities.items():
+                    priorities.setdefault(key, []).extend(items)
+                self.quote_router.set_priorities(priorities)
+
+                # Targets: (ls_item, key). key bleibt stabil fürs Frontend (Instrument-/FX-Code).
                 targets: List[tuple[str, str]] = []
-                seen_keys: set[str] = set()
+                seen_keys: set[str] = {str(i.get("code")) for i in instruments if i.get("code")}
                 tradegate_map: Dict[str, str] = {}
 
-                for instr in instruments:
-                    code = (instr.get("code") or "").strip()
-                    if not code or code in seen_keys:
+                ls_seen: set[str] = set()
+                for src in all_sources:
+                    source = str(src.get("source") or "").strip().lower()
+                    key = (src.get("instrument_code") or src.get("fx_code") or "").strip()
+                    if not source or not key:
                         continue
-                    seen_keys.add(code)
-                    ls_item = instrument_to_ls_item(instr)
-                    if ls_item:
-                        targets.append((ls_item, code))
-                    tg_isin = instrument_to_tradegate_isin(instr)
-                    if tg_isin:
-                        tradegate_map[code] = tg_isin
+                    source_code = str(src.get("source_code") or "").strip().upper()
+                    if source == SOURCE_LIGHTSTREAMER:
+                        ls_item = ls_source_to_item(source_code)
+                        if ls_item and ls_item not in ls_seen:
+                            ls_seen.add(ls_item)
+                            targets.append((ls_item, key))
+                    elif source == SOURCE_TRADEGATE:
+                        if is_isin(source_code) and key not in tradegate_map:
+                            tradegate_map[key] = source_code
+                        elif source_code and not is_isin(source_code):
+                            logger.warning("Tradegate source_code ist keine ISIN: %s", source_code)
 
                 items = [t[0] for t in targets]
                 idx_to_key = {idx + 1: t[1] for idx, t in enumerate(targets)}
@@ -1250,6 +1297,17 @@ class FxRateUpdate(BaseModel):
     ls_item: Optional[str] = Field(default=None, max_length=64)
 
 
+class SourceCreate(BaseModel):
+    source: str = Field(min_length=1, max_length=32)
+    source_code: str = Field(min_length=1, max_length=128)
+    priority: int = Field(default=100, ge=0, le=1000)
+
+
+class SourceUpdate(BaseModel):
+    source_code: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    priority: Optional[int] = Field(default=None, ge=0, le=1000)
+
+
 class PositionIn(BaseModel):
     instrument_id: int
     name: Optional[str] = Field(default=None, max_length=200)
@@ -1302,6 +1360,14 @@ def _normalize_currency(value: Optional[str], default: Optional[str] = "EUR") ->
     if v:
         return v
     return (default or "").strip().upper()
+
+
+def _normalize_source(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _normalize_source_code(value: str) -> str:
+    return (value or "").strip().upper()
 
 
 
@@ -1482,6 +1548,90 @@ async def delete_instrument(instrument_id: int) -> None:
     return None
 
 
+@app.get("/api/instruments/{instrument_id}/sources")
+async def list_instrument_sources(instrument_id: int) -> List[Dict[str, Any]]:
+    _get_instrument(instrument_id)
+    cur = _conn.execute(
+        "SELECT id, source, source_code, priority FROM instrument_sources WHERE instrument_id=? ORDER BY priority ASC, id ASC",
+        (instrument_id,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+@app.post("/api/instruments/{instrument_id}/sources", status_code=201)
+async def add_instrument_source(instrument_id: int, body: SourceCreate) -> Dict[str, Any]:
+    _get_instrument(instrument_id)
+    source = _normalize_source(body.source)
+    source_code = _normalize_source_code(body.source_code)
+    try:
+        cur = _conn.execute(
+            "INSERT INTO instrument_sources(instrument_id, source, source_code, priority) VALUES (?,?,?,?)",
+            (instrument_id, source, source_code, body.priority),
+        )
+        _conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Kursquelle konnte nicht gespeichert werden: {e}")
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return {
+        "id": int(cur.lastrowid),
+        "source": source,
+        "source_code": source_code,
+        "priority": body.priority,
+    }
+
+
+@app.put("/api/instruments/{instrument_id}/sources/{source_id}")
+async def update_instrument_source(instrument_id: int, source_id: int, body: SourceUpdate) -> Dict[str, Any]:
+    _get_instrument(instrument_id)
+    row = _conn.execute(
+        "SELECT id FROM instrument_sources WHERE id=? AND instrument_id=?",
+        (source_id, instrument_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Kursquelle nicht gefunden")
+    fields: List[str] = []
+    values: List[Any] = []
+    if body.source_code is not None:
+        fields.append("source_code=?")
+        values.append(_normalize_source_code(body.source_code))
+    if body.priority is not None:
+        fields.append("priority=?")
+        values.append(body.priority)
+    if fields:
+        values.extend([source_id, instrument_id])
+        try:
+            _conn.execute(
+                f"UPDATE instrument_sources SET {', '.join(fields)} WHERE id=? AND instrument_id=?",
+                tuple(values),
+            )
+            _conn.commit()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Kursquelle konnte nicht aktualisiert werden: {e}")
+        stream_manager.mark_dirty()
+        _publish_mqtt_snapshot()
+    out = _conn.execute(
+        "SELECT id, source, source_code, priority FROM instrument_sources WHERE id=?",
+        (source_id,),
+    ).fetchone()
+    return dict(out)
+
+
+@app.delete("/api/instruments/{instrument_id}/sources/{source_id}", status_code=204)
+async def delete_instrument_source(instrument_id: int, source_id: int) -> None:
+    _get_instrument(instrument_id)
+    cur = _conn.execute(
+        "DELETE FROM instrument_sources WHERE id=? AND instrument_id=?",
+        (source_id, instrument_id),
+    )
+    _conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Kursquelle nicht gefunden")
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return None
+
+
 @app.get("/api/fx-rates")
 async def list_fx_rates() -> List[Dict[str, Any]]:
     cur = _conn.execute(
@@ -1575,6 +1725,90 @@ async def delete_fx_rate(fx_id: int) -> None:
     _get_fx_rate(fx_id)
     _conn.execute("DELETE FROM fx_rates WHERE id=?", (fx_id,))
     _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return None
+
+
+@app.get("/api/fx-rates/{fx_id}/sources")
+async def list_fx_rate_sources(fx_id: int) -> List[Dict[str, Any]]:
+    _get_fx_rate(fx_id)
+    cur = _conn.execute(
+        "SELECT id, source, source_code, priority FROM fx_rate_sources WHERE fx_rate_id=? ORDER BY priority ASC, id ASC",
+        (fx_id,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+@app.post("/api/fx-rates/{fx_id}/sources", status_code=201)
+async def add_fx_rate_source(fx_id: int, body: SourceCreate) -> Dict[str, Any]:
+    _get_fx_rate(fx_id)
+    source = _normalize_source(body.source)
+    source_code = _normalize_source_code(body.source_code)
+    try:
+        cur = _conn.execute(
+            "INSERT INTO fx_rate_sources(fx_rate_id, source, source_code, priority) VALUES (?,?,?,?)",
+            (fx_id, source, source_code, body.priority),
+        )
+        _conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Kursquelle konnte nicht gespeichert werden: {e}")
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+    return {
+        "id": int(cur.lastrowid),
+        "source": source,
+        "source_code": source_code,
+        "priority": body.priority,
+    }
+
+
+@app.put("/api/fx-rates/{fx_id}/sources/{source_id}")
+async def update_fx_rate_source(fx_id: int, source_id: int, body: SourceUpdate) -> Dict[str, Any]:
+    _get_fx_rate(fx_id)
+    row = _conn.execute(
+        "SELECT id FROM fx_rate_sources WHERE id=? AND fx_rate_id=?",
+        (source_id, fx_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Kursquelle nicht gefunden")
+    fields: List[str] = []
+    values: List[Any] = []
+    if body.source_code is not None:
+        fields.append("source_code=?")
+        values.append(_normalize_source_code(body.source_code))
+    if body.priority is not None:
+        fields.append("priority=?")
+        values.append(body.priority)
+    if fields:
+        values.extend([source_id, fx_id])
+        try:
+            _conn.execute(
+                f"UPDATE fx_rate_sources SET {', '.join(fields)} WHERE id=? AND fx_rate_id=?",
+                tuple(values),
+            )
+            _conn.commit()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Kursquelle konnte nicht aktualisiert werden: {e}")
+        stream_manager.mark_dirty()
+        _publish_mqtt_snapshot()
+    out = _conn.execute(
+        "SELECT id, source, source_code, priority FROM fx_rate_sources WHERE id=?",
+        (source_id,),
+    ).fetchone()
+    return dict(out)
+
+
+@app.delete("/api/fx-rates/{fx_id}/sources/{source_id}", status_code=204)
+async def delete_fx_rate_source(fx_id: int, source_id: int) -> None:
+    _get_fx_rate(fx_id)
+    cur = _conn.execute(
+        "DELETE FROM fx_rate_sources WHERE id=? AND fx_rate_id=?",
+        (source_id, fx_id),
+    )
+    _conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Kursquelle nicht gefunden")
     stream_manager.mark_dirty()
     _publish_mqtt_snapshot()
     return None

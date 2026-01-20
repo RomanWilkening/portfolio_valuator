@@ -42,6 +42,7 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 - Instrument-Codes muessen **nicht** ISINs sein; fuer Kurse nutze optional ISIN/LS Item.
 - Lightstreamer nutzt `LS_ITEM_TEMPLATE` mit ISIN oder explizites `LS Item` am Instrument.
 - Tradegate nutzt die ISIN am Instrument (falls gesetzt).
+- Kursquellen werden pro Instrument/FX gepflegt (Quelle + Source-ID + Prioritaet).
 
 ### Watchlist (Dashboard)
 

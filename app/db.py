@@ -36,6 +36,17 @@ def init_db(conn: sqlite3.Connection) -> None:
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
 
+        CREATE TABLE IF NOT EXISTS instrument_sources (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          instrument_id INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          source_code TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 100,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          FOREIGN KEY (instrument_id) REFERENCES instruments(id) ON DELETE CASCADE,
+          UNIQUE (instrument_id, source, source_code)
+        );
+
         CREATE TABLE IF NOT EXISTS fx_rates (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           code TEXT NOT NULL UNIQUE,
@@ -45,6 +56,17 @@ def init_db(conn: sqlite3.Connection) -> None:
           isin TEXT,
           ls_item TEXT,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS fx_rate_sources (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          fx_rate_id INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          source_code TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 100,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          FOREIGN KEY (fx_rate_id) REFERENCES fx_rates(id) ON DELETE CASCADE,
+          UNIQUE (fx_rate_id, source, source_code)
         );
 
         CREATE TABLE IF NOT EXISTS portfolios (
@@ -230,6 +252,39 @@ def init_db(conn: sqlite3.Connection) -> None:
                     "UPDATE instruments SET type='asset', base_currency=NULL, quote_currency=NULL WHERE id=?",
                     (row["id"],),
                 )
+    except Exception:
+        pass
+
+    def _add_source(table: str, target_id: int, source: str, source_code: str, priority: int) -> None:
+        try:
+            conn.execute(
+                f"INSERT INTO {table}(instrument_id, source, source_code, priority) VALUES (?,?,?,?)"
+                if table == "instrument_sources"
+                else f"INSERT INTO {table}(fx_rate_id, source, source_code, priority) VALUES (?,?,?,?)",
+                (target_id, source, source_code, priority),
+            )
+        except Exception:
+            pass
+
+    try:
+        instr_rows = conn.execute("SELECT id, code, isin, ls_item FROM instruments").fetchall()
+        for row in instr_rows:
+            if row["ls_item"]:
+                _add_source("instrument_sources", row["id"], "lightstreamer", row["ls_item"], 10)
+            if row["isin"]:
+                _add_source("instrument_sources", row["id"], "lightstreamer", row["isin"], 20)
+                _add_source("instrument_sources", row["id"], "tradegate", row["isin"], 30)
+    except Exception:
+        pass
+
+    try:
+        fx_rows = conn.execute("SELECT id, code, isin, ls_item FROM fx_rates").fetchall()
+        for row in fx_rows:
+            if row["ls_item"]:
+                _add_source("fx_rate_sources", row["id"], "lightstreamer", row["ls_item"], 10)
+            if row["isin"]:
+                _add_source("fx_rate_sources", row["id"], "lightstreamer", row["isin"], 20)
+                _add_source("fx_rate_sources", row["id"], "tradegate", row["isin"], 30)
     except Exception:
         pass
 
