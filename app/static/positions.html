@@ -448,6 +448,33 @@
 
         tdCount.textContent = String(pf.position_count || 0);
 
+        // Sync-Button fuer Banking Bridge verknuepfte Portfolios
+        if (pf.banking_bridge_depot_id) {
+          const syncBtn = document.createElement("button");
+          syncBtn.className = "button ghost";
+          syncBtn.textContent = "BB Sync";
+          syncBtn.title = `Mit Banking Bridge Depot #${pf.banking_bridge_depot_id} synchronisieren`;
+          syncBtn.style.fontSize = "12px";
+          syncBtn.style.marginRight = "6px";
+          syncBtn.onclick = async () => {
+            try {
+              setStatus("info", "Synchronisiere mit Banking Bridge...");
+              const result = await api(`/api/banking-bridge/sync/${pf.id}`, { method: "POST" });
+              const parts = [];
+              if (result.added > 0) parts.push(`${result.added} neu`);
+              if (result.updated > 0) parts.push(`${result.updated} aktualisiert`);
+              if (result.removed > 0) parts.push(`${result.removed} entfernt`);
+              const summary = parts.length ? parts.join(", ") : "Keine Aenderungen";
+              setStatus("success", `BB Sync: ${summary}`);
+              await loadPortfolio(pf.id);
+              await loadPortfolios();
+            } catch (e) {
+              setStatus("error", `BB Sync fehlgeschlagen: ${e.message || e}`);
+            }
+          };
+          tdActions.appendChild(syncBtn);
+        }
+
         const delBtn = document.createElement("button");
         delBtn.className = "button ghost";
         delBtn.textContent = "Loeschen";
