@@ -57,6 +57,35 @@ Die SQLite liegt dann persistent in `./data/app.db` (als Volume nach `/app/data`
 - Portfolios, Positionen und Watchlist lassen sich per Drag&Drop sortieren.
 - Die Reihenfolge wird persistent gespeichert.
 
+### Banking Bridge Integration
+
+Der Portfolio Valuator kann Depots aus einer laufenden [Banking Bridge](https://github.com/RomanWilkening/banking_bridge_3) Instanz importieren und synchronisieren. Die Banking Bridge ruft Wertpapierbestaende ueber FinTS ab.
+
+**Einrichtung:**
+
+1. Banking Bridge URL unter **Einstellungen** konfigurieren (z.B. `http://192.168.1.100:8080`).
+2. Verbindung testen und verfuegbare Depots laden.
+3. Depot als neues Portfolio importieren (erstellt automatisch Instrumente + Kursquellen).
+4. Jederzeit mit **Synchronisieren** aktualisieren (neue Holdings werden hinzugefuegt, entfernte geloescht, Mengen/Entry aktualisiert).
+
+**Oder via ENV (Initial-Default):**
+
+```env
+BANKING_BRIDGE_URL=http://192.168.1.100:8080
+```
+
+**API-Endpunkte:**
+
+- `GET /api/settings/banking-bridge` – Banking Bridge URL lesen
+- `PUT /api/settings/banking-bridge` – Banking Bridge URL setzen
+- `GET /api/banking-bridge/status` – Verbindungsstatus
+- `GET /api/banking-bridge/depots` – Verfuegbare Depots (inkl. Verknuepfungsstatus)
+- `GET /api/banking-bridge/depots/{id}/holdings` – Holdings eines Depots
+- `POST /api/banking-bridge/import/{depot_id}` – Depot als Portfolio importieren
+- `POST /api/banking-bridge/sync/{portfolio_id}` – Verknuepftes Portfolio synchronisieren
+- `POST /api/banking-bridge/link/{portfolio_id}/{depot_id}` – Portfolio manuell verknuepfen
+- `POST /api/banking-bridge/unlink/{portfolio_id}` – Verknuepfung aufheben
+
 ### Einstellungen (MQTT)
 
 MQTT-Konfiguration und Aktivierung erfolgen im Tab **Einstellungen**.

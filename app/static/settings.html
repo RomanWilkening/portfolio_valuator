@@ -280,6 +280,34 @@
             <button id="saveMqttBtn" class="button">Speichern</button>
           </div>
         </section>
+
+        <section class="card" style="margin-top: 16px;">
+          <h2>Banking Bridge</h2>
+          <div class="sub">Depots aus der Banking Bridge (FinTS) importieren und synchronisieren</div>
+
+          <div class="form-grid">
+            <div class="field" style="grid-column: span 2;">
+              <label for="bbUrl">Banking Bridge URL</label>
+              <div class="inline-form">
+                <input id="bbUrl" placeholder="http://192.168.1.100:8080" style="flex:1;" />
+                <button id="saveBbBtn" class="button">Speichern</button>
+                <button id="testBbBtn" class="button ghost">Verbindung testen</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="bbStatus" class="status info" style="margin-top: 12px; display: none;"></div>
+
+          <div style="margin-top: 16px;">
+            <div class="inline-form" style="justify-content: space-between; align-items: center;">
+              <h3 style="margin: 0;">Verfuegbare Depots</h3>
+              <button id="loadDepotsBtn" class="button ghost">Depots laden</button>
+            </div>
+            <div id="depotsContainer" style="margin-top: 12px;">
+              <div class="sub">Bitte zuerst Banking Bridge URL konfigurieren und Depots laden.</div>
+            </div>
+          </div>
+        </section>
       </div>
     </main>
   </div>
@@ -408,7 +436,155 @@
     mqttToggleBtn.onclick = () => toggleMqtt().catch(e => setStatus("error", String(e.message || e)));
     saveMqttBtn.onclick = () => saveMqttConfig().catch(e => setStatus("error", String(e.message || e)));
 
-    Promise.all([loadMqttStatus(), loadMqttConfig()])
+    // ── Banking Bridge ──
+    const bbUrlEl = document.getElementById("bbUrl");
+    const saveBbBtn = document.getElementById("saveBbBtn");
+    const testBbBtn = document.getElementById("testBbBtn");
+    const bbStatusEl = document.getElementById("bbStatus");
+    const loadDepotsBtn = document.getElementById("loadDepotsBtn");
+    const depotsContainer = document.getElementById("depotsContainer");
+
+    function setBbStatus(level, message) {
+      bbStatusEl.style.display = "";
+      bbStatusEl.className = "status " + level;
+      bbStatusEl.textContent = message;
+    }
+
+    async function loadBbConfig() {
+      const s = await api("/api/settings/banking-bridge");
+      bbUrlEl.value = s.url || "";
+    }
+
+    async function saveBbConfig() {
+      const url = bbUrlEl.value.trim();
+      setBbStatus("info", "Speichere Banking Bridge URL...");
+      await api("/api/settings/banking-bridge", { method: "PUT", body: JSON.stringify({ url }) });
+      setBbStatus("success", "Banking Bridge URL gespeichert.");
+    }
+
+    async function testBbConnection() {
+      setBbStatus("info", "Teste Verbindung zur Banking Bridge...");
+      const s = await api("/api/banking-bridge/status");
+      if (s.connected) {
+        setBbStatus("success", `Verbunden — ${s.depot_count} Depot(s) gefunden`);
+      } else {
+        setBbStatus("error", `Nicht verbunden: ${s.error || "Unbekannter Fehler"}`);
+      }
+    }
+
+    async function loadDepots() {
+      setBbStatus("info", "Lade Depots von Banking Bridge...");
+      let data;
+      try {
+        data = await api("/api/banking-bridge/depots");
+      } catch (e) {
+        setBbStatus("error", `Fehler: ${e.message || e}`);
+        return;
+      }
+      const depots = data.depots || [];
+      if (!depots.length) {
+        depotsContainer.innerHTML = '<div class="sub">Keine Depots gefunden.</div>';
+        setBbStatus("warn", "Keine Depots in der Banking Bridge gefunden.");
+        return;
+      }
+      setBbStatus("success", `${depots.length} Depot(s) geladen.`);
+      renderDepots(depots);
+    }
+
+    function renderDepots(depots) {
+      let html = '<table style="width:100%; border-collapse:collapse; margin-top:8px;">';
+      html += '<thead><tr>';
+      html += '<th style="text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); font-size:12px; text-transform:uppercase; color:var(--muted);">Bank / Depot</th>';
+      html += '<th style="text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); font-size:12px; text-transform:uppercase; color:var(--muted);">Konto</th>';
+      html += '<th style="text-align:right; padding:8px 12px; border-bottom:1px solid var(--line); font-size:12px; text-transform:uppercase; color:var(--muted);">Wert</th>';
+      html += '<th style="text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); font-size:12px; text-transform:uppercase; color:var(--muted);">Letztes Update</th>';
+      html += '<th style="text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); font-size:12px; text-transform:uppercase; color:var(--muted);">Status</th>';
+      html += '<th style="padding:8px 12px; border-bottom:1px solid var(--line);"></th>';
+      html += '</tr></thead><tbody>';
+
+      for (const d of depots) {
+        const linked = d.linked_portfolio_id != null;
+        const valueStr = d.total_value != null ? `${Number(d.total_value).toLocaleString("de-DE", {minimumFractionDigits: 2})} ${d.currency || "EUR"}` : "—";
+        const statusStr = linked
+          ? `<span class="pill" style="background:#e7f7ea; color:#1f6f3a;">Verknuepft (#${d.linked_portfolio_id})</span>`
+          : '<span class="pill">Nicht importiert</span>';
+        const accountStr = d.account_number + (d.sub_account ? "/" + d.sub_account : "");
+
+        html += '<tr>';
+        html += `<td style="padding:8px 12px; border-bottom:1px solid var(--line);"><strong>${escHtml(d.bank || "")}</strong><br><span style="color:var(--muted); font-size:13px;">${escHtml(d.name || "")}</span></td>`;
+        html += `<td style="padding:8px 12px; border-bottom:1px solid var(--line); font-size:13px;">${escHtml(accountStr)}</td>`;
+        html += `<td style="padding:8px 12px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums;">${valueStr}</td>`;
+        html += `<td style="padding:8px 12px; border-bottom:1px solid var(--line); font-size:13px; color:var(--muted);">${escHtml(d.last_update || "—")}</td>`;
+        html += `<td style="padding:8px 12px; border-bottom:1px solid var(--line);">${statusStr}</td>`;
+        html += '<td style="padding:8px 12px; border-bottom:1px solid var(--line);">';
+        if (linked) {
+          html += `<button class="button ghost" onclick="syncDepot(${d.linked_portfolio_id})" style="font-size:13px;">Synchronisieren</button>`;
+          html += ` <button class="button ghost" onclick="unlinkDepot(${d.linked_portfolio_id})" style="font-size:13px; color:var(--muted);">Trennen</button>`;
+        } else {
+          html += `<button class="button" onclick="importDepot(${d.id})" style="font-size:13px;">Importieren</button>`;
+        }
+        html += '</td></tr>';
+      }
+
+      html += '</tbody></table>';
+      depotsContainer.innerHTML = html;
+    }
+
+    function escHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s || "";
+      return d.innerHTML;
+    }
+
+    async function importDepot(depotId) {
+      if (!confirm("Depot als neues Portfolio importieren?")) return;
+      setBbStatus("info", "Importiere Depot...");
+      try {
+        const result = await api(`/api/banking-bridge/import/${depotId}`, { method: "POST" });
+        setBbStatus("success",
+          `Portfolio "${result.portfolio_name}" erstellt — ${result.imported_positions} Position(en) importiert` +
+          (result.skipped.length ? `, ${result.skipped.length} uebersprungen` : "")
+        );
+        await loadDepots();
+      } catch (e) {
+        setBbStatus("error", `Import fehlgeschlagen: ${e.message || e}`);
+      }
+    }
+
+    async function syncDepot(portfolioId) {
+      setBbStatus("info", "Synchronisiere Portfolio mit Banking Bridge...");
+      try {
+        const result = await api(`/api/banking-bridge/sync/${portfolioId}`, { method: "POST" });
+        const parts = [];
+        if (result.added > 0) parts.push(`${result.added} neu`);
+        if (result.updated > 0) parts.push(`${result.updated} aktualisiert`);
+        if (result.removed > 0) parts.push(`${result.removed} entfernt`);
+        if (result.skipped.length > 0) parts.push(`${result.skipped.length} uebersprungen`);
+        const summary = parts.length ? parts.join(", ") : "Keine Aenderungen";
+        setBbStatus("success", `Synchronisierung abgeschlossen: ${summary}`);
+        await loadDepots();
+      } catch (e) {
+        setBbStatus("error", `Synchronisierung fehlgeschlagen: ${e.message || e}`);
+      }
+    }
+
+    async function unlinkDepot(portfolioId) {
+      if (!confirm("Verknuepfung zum Banking Bridge Depot aufheben?\n\nDas Portfolio und seine Positionen bleiben erhalten.")) return;
+      setBbStatus("info", "Trenne Verknuepfung...");
+      try {
+        await api(`/api/banking-bridge/unlink/${portfolioId}`, { method: "POST" });
+        setBbStatus("success", "Verknuepfung aufgehoben.");
+        await loadDepots();
+      } catch (e) {
+        setBbStatus("error", `Fehler: ${e.message || e}`);
+      }
+    }
+
+    saveBbBtn.onclick = () => saveBbConfig().catch(e => setBbStatus("error", String(e.message || e)));
+    testBbBtn.onclick = () => testBbConnection().catch(e => setBbStatus("error", String(e.message || e)));
+    loadDepotsBtn.onclick = () => loadDepots().catch(e => setBbStatus("error", String(e.message || e)));
+
+    Promise.all([loadMqttStatus(), loadMqttConfig(), loadBbConfig()])
       .then(() => setStatus("success", "Bereit."))
       .catch(e => setStatus("error", String(e.message || e)));
   </script>

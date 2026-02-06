@@ -29,6 +29,7 @@ from app.quote_sources import (
     normalize_bitfinex_symbol,
     parse_source_priority,
 )
+from app.banking_bridge import BankingBridgeClient, BankingBridgeSettings
 from app.settings import get_bool, get_float, get_int, get_setting, set_bool, set_setting
 
 logging.basicConfig(level=logging.INFO)
@@ -2269,7 +2270,7 @@ async def delete_fx_rate_source(fx_id: int, source_id: int) -> None:
 async def list_portfolios() -> List[Dict[str, Any]]:
     cur = _conn.execute(
         """
-        SELECT p.id, p.name, p.currency, COUNT(pos.id) AS positions_count
+        SELECT p.id, p.name, p.currency, p.banking_bridge_depot_id, COUNT(pos.id) AS positions_count
         FROM portfolios p
         LEFT JOIN positions pos ON pos.portfolio_id = p.id
         GROUP BY p.id
@@ -2419,7 +2420,7 @@ async def value_all_portfolios() -> List[Dict[str, Any]]:
 
 @app.get("/api/portfolios/{portfolio_id}")
 async def get_portfolio(portfolio_id: int) -> Dict[str, Any]:
-    cur = _conn.execute("SELECT id, name, currency FROM portfolios WHERE id=?", (portfolio_id,))
+    cur = _conn.execute("SELECT id, name, currency, banking_bridge_depot_id FROM portfolios WHERE id=?", (portfolio_id,))
     row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
@@ -2752,3 +2753,823 @@ async def mqtt_set_enabled(body: Dict[str, Any]) -> Dict[str, Any]:
         _mqtt_disconnect()
         stream_manager.mark_dirty()
     return await mqtt_status()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Banking Bridge Integration
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _bb_client() -> BankingBridgeClient:
+    url = _get_setting_str("banking_bridge_url", "")
+    return BankingBridgeClient(BankingBridgeSettings(base_url=url))
+
+
+class BankingBridgeSettingsUpdate(BaseModel):
+    url: Optional[str] = None
+
+
+@app.get("/api/settings/banking-bridge")
+async def get_banking_bridge_settings() -> Dict[str, Any]:
+    url = _get_setting_str("banking_bridge_url", "")
+    return {"url": url}
+
+
+@app.put("/api/settings/banking-bridge")
+async def update_banking_bridge_settings(body: BankingBridgeSettingsUpdate) -> Dict[str, Any]:
+    if body.url is not None:
+        set_setting(_conn, "banking_bridge_url", (body.url or "").strip())
+    url = _get_setting_str("banking_bridge_url", "")
+    return {"url": url}
+
+
+@app.get("/api/banking-bridge/status")
+async def banking_bridge_status() -> Dict[str, Any]:
+    try:
+        client = _bb_client()
+        result = client.check_connection()
+        return {
+            "connected": True,
+            "depot_count": result.get("depot_count", 0),
+            "url": client.base_url,
+        }
+    except Exception as e:
+        return {
+            "connected": False,
+            "error": str(e),
+            "url": _get_setting_str("banking_bridge_url", ""),
+        }
+
+
+@app.get("/api/banking-bridge/depots")
+async def list_banking_bridge_depots() -> Dict[str, Any]:
+    client = _bb_client()
+    try:
+        depots = client.list_depots()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Verknuepfungsstatus: welche Depots sind bereits als Portfolio importiert?
+    linked: Dict[int, int] = {}
+    rows = _conn.execute(
+        "SELECT id, banking_bridge_depot_id FROM portfolios WHERE banking_bridge_depot_id IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        linked[int(r["banking_bridge_depot_id"])] = int(r["id"])
+
+    out = []
+    for d in depots:
+        out.append({
+            "id": d.id,
+            "name": d.name,
+            "account_number": d.account_number,
+            "sub_account": d.sub_account,
+            "bank": d.bank,
+            "bank_code": d.bank_code,
+            "total_value": d.total_value,
+            "currency": d.currency,
+            "last_update": d.last_update,
+            "linked_portfolio_id": linked.get(d.id),
+        })
+    return {"depots": out, "count": len(out)}
+
+
+@app.get("/api/banking-bridge/depots/{depot_id}/holdings")
+async def get_banking_bridge_holdings(depot_id: int) -> Dict[str, Any]:
+    client = _bb_client()
+    try:
+        holdings = client.get_holdings(depot_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    out = []
+    for h in holdings:
+        out.append({
+            "isin": h.isin,
+            "wkn": h.wkn,
+            "name": h.name,
+            "quantity": h.quantity,
+            "currency": h.currency,
+            "current_price": h.current_price,
+            "purchase_price": h.purchase_price,
+            "total_value": h.total_value,
+            "profit_loss": h.profit_loss,
+            "profit_loss_percent": h.profit_loss_percent,
+            "price_date": h.price_date,
+            "updated_at": h.updated_at,
+        })
+    return {"holdings": out, "count": len(out)}
+
+
+def _get_or_create_instrument_for_holding(
+    isin: str,
+    name: str,
+    currency: str,
+) -> int:
+    """Findet oder erstellt ein Instrument anhand der ISIN."""
+    isin = (isin or "").strip().upper()
+    if not isin:
+        raise ValueError("ISIN darf nicht leer sein")
+
+    # Suche bestehendes Instrument nach ISIN
+    row = _conn.execute(
+        "SELECT id FROM instruments WHERE isin=? AND (type IS NULL OR type='asset')",
+        (isin,),
+    ).fetchone()
+    if row:
+        return int(row["id"])
+
+    # Suche nach Code = ISIN
+    row = _conn.execute(
+        "SELECT id FROM instruments WHERE code=? AND (type IS NULL OR type='asset')",
+        (isin,),
+    ).fetchone()
+    if row:
+        # ISIN-Feld nachtragen
+        _conn.execute("UPDATE instruments SET isin=? WHERE id=? AND isin IS NULL", (isin, row["id"]))
+        return int(row["id"])
+
+    # Neues Instrument anlegen
+    cur = _conn.execute(
+        "INSERT INTO instruments(code, name, currency, type, isin) VALUES (?,?,?,?,?)",
+        (isin, name or isin, (currency or "EUR").strip().upper(), "asset", isin),
+    )
+    instrument_id = int(cur.lastrowid)
+
+    # Auto-Kursquellen: Tradegate (ISIN-basiert) + Lightstreamer
+    try:
+        _conn.execute(
+            "INSERT INTO instrument_sources(instrument_id, source, source_code, priority) VALUES (?,?,?,?)",
+            (instrument_id, "lightstreamer", isin, 10),
+        )
+    except Exception:
+        pass
+    try:
+        _conn.execute(
+            "INSERT INTO instrument_sources(instrument_id, source, source_code, priority) VALUES (?,?,?,?)",
+            (instrument_id, "tradegate", isin, 20),
+        )
+    except Exception:
+        pass
+
+    return instrument_id
+
+
+@app.post("/api/banking-bridge/import/{depot_id}")
+async def import_depot_as_portfolio(depot_id: int) -> Dict[str, Any]:
+    """
+    Importiert ein Depot aus der Banking Bridge als neues Portfolio.
+    Erstellt automatisch Instrumente fuer alle Holdings (anhand ISIN).
+    """
+    client = _bb_client()
+
+    # Pruefen ob Depot bereits importiert ist
+    existing = _conn.execute(
+        "SELECT id, name FROM portfolios WHERE banking_bridge_depot_id=?",
+        (depot_id,),
+    ).fetchone()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Depot ist bereits als Portfolio '{existing['name']}' (#{existing['id']}) verknuepft",
+        )
+
+    try:
+        depot = client.get_depot(depot_id)
+        holdings = client.get_holdings(depot_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Portfolio Name: "Bank - Depotname" (oder nur Depotname)
+    portfolio_name = f"{depot.bank} - {depot.name}" if depot.bank else depot.name
+    portfolio_currency = (depot.currency or "EUR").strip().upper()
+
+    max_row = _conn.execute("SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM portfolios").fetchone()
+    next_order = int(max_row["max_order"] if max_row else -1) + 1
+
+    cur = _conn.execute(
+        "INSERT INTO portfolios(name, currency, sort_order, banking_bridge_depot_id) VALUES (?,?,?,?)",
+        (portfolio_name, portfolio_currency, next_order, depot_id),
+    )
+    portfolio_id = int(cur.lastrowid)
+
+    # Positionen importieren
+    imported_count = 0
+    skipped = []
+    for idx, h in enumerate(holdings):
+        if not h.isin or h.quantity <= 0:
+            skipped.append({"name": h.name, "reason": "Keine ISIN oder Menge <= 0"})
+            continue
+
+        try:
+            instrument_id = _get_or_create_instrument_for_holding(
+                isin=h.isin,
+                name=h.name,
+                currency=h.currency,
+            )
+        except Exception as e:
+            skipped.append({"name": h.name, "isin": h.isin, "reason": str(e)})
+            continue
+
+        entry_price = h.purchase_price if h.purchase_price and h.purchase_price > 0 else 0.01
+        pos_currency = (h.currency or portfolio_currency).strip().upper()
+
+        _conn.execute(
+            "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency, sort_order) VALUES (?,?,?,?,?,?,?,?)",
+            (portfolio_id, instrument_id, h.isin, h.name, h.quantity, entry_price, pos_currency, idx),
+        )
+        imported_count += 1
+
+    _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+
+    return {
+        "portfolio_id": portfolio_id,
+        "portfolio_name": portfolio_name,
+        "depot_id": depot_id,
+        "imported_positions": imported_count,
+        "skipped": skipped,
+        "total_holdings": len(holdings),
+    }
+
+
+@app.post("/api/banking-bridge/sync/{portfolio_id}")
+async def sync_portfolio_from_banking_bridge(portfolio_id: int) -> Dict[str, Any]:
+    """
+    Aktualisiert ein verknuepftes Portfolio mit den aktuellen Depot-Daten
+    aus der Banking Bridge. Neue Holdings werden hinzugefuegt, bestehende
+    aktualisiert (Menge, Entry-Preis), entfernte geloescht.
+    """
+    row = _conn.execute(
+        "SELECT id, name, currency, banking_bridge_depot_id FROM portfolios WHERE id=?",
+        (portfolio_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+    depot_id = row["banking_bridge_depot_id"]
+    if not depot_id:
+        raise HTTPException(status_code=400, detail="Portfolio ist nicht mit einem Banking Bridge Depot verknuepft")
+
+    portfolio_currency = (row["currency"] or "EUR").strip().upper()
+    client = _bb_client()
+
+    try:
+        holdings = client.get_holdings(int(depot_id))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Aktuelle Positionen laden
+    existing_positions = _conn.execute(
+        """
+        SELECT pos.id, pos.instrument_id, pos.isin, pos.quantity, pos.entry_price, pos.currency,
+               instr.isin AS instrument_isin
+        FROM positions pos
+        LEFT JOIN instruments instr ON instr.id = pos.instrument_id
+        WHERE pos.portfolio_id=?
+        """,
+        (portfolio_id,),
+    ).fetchall()
+
+    # Index: ISIN -> bestehende Position
+    existing_by_isin: Dict[str, Dict[str, Any]] = {}
+    for p in existing_positions:
+        isin_key = (p["instrument_isin"] or p["isin"] or "").strip().upper()
+        if isin_key:
+            existing_by_isin[isin_key] = dict(p)
+
+    added = 0
+    updated = 0
+    removed = 0
+    skipped = []
+    seen_isins: set[str] = set()
+
+    # Max sort_order fuer neue Positionen
+    max_sort = _conn.execute(
+        "SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM positions WHERE portfolio_id=?",
+        (portfolio_id,),
+    ).fetchone()
+    next_sort = int(max_sort["max_order"] if max_sort else -1) + 1
+
+    for h in holdings:
+        isin = (h.isin or "").strip().upper()
+        if not isin or h.quantity <= 0:
+            skipped.append({"name": h.name, "reason": "Keine ISIN oder Menge <= 0"})
+            continue
+
+        seen_isins.add(isin)
+        entry_price = h.purchase_price if h.purchase_price and h.purchase_price > 0 else 0.01
+        pos_currency = (h.currency or portfolio_currency).strip().upper()
+
+        if isin in existing_by_isin:
+            # Bestehende Position aktualisieren
+            pos = existing_by_isin[isin]
+            changes = []
+            values = []
+            if abs(pos["quantity"] - h.quantity) > 0.0001:
+                changes.append("quantity=?")
+                values.append(h.quantity)
+            if h.purchase_price and h.purchase_price > 0 and abs(pos["entry_price"] - entry_price) > 0.0001:
+                changes.append("entry_price=?")
+                values.append(entry_price)
+            if pos_currency != (pos["currency"] or "EUR").strip().upper():
+                changes.append("currency=?")
+                values.append(pos_currency)
+
+            if changes:
+                values.append(pos["id"])
+                _conn.execute(
+                    f"UPDATE positions SET {', '.join(changes)} WHERE id=?",
+                    tuple(values),
+                )
+                updated += 1
+        else:
+            # Neue Position hinzufuegen
+            try:
+                instrument_id = _get_or_create_instrument_for_holding(
+                    isin=isin,
+                    name=h.name,
+                    currency=h.currency,
+                )
+            except Exception as e:
+                skipped.append({"name": h.name, "isin": isin, "reason": str(e)})
+                continue
+
+            _conn.execute(
+                "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency, sort_order) VALUES (?,?,?,?,?,?,?,?)",
+                (portfolio_id, instrument_id, isin, h.name, h.quantity, entry_price, pos_currency, next_sort),
+            )
+            next_sort += 1
+            added += 1
+
+    # Positionen entfernen, die nicht mehr im Depot sind
+    for isin_key, pos in existing_by_isin.items():
+        if isin_key not in seen_isins:
+            _conn.execute("DELETE FROM positions WHERE id=?", (pos["id"],))
+            removed += 1
+
+    _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+
+    return {
+        "portfolio_id": portfolio_id,
+        "depot_id": depot_id,
+        "added": added,
+        "updated": updated,
+        "removed": removed,
+        "skipped": skipped,
+        "total_holdings": len(holdings),
+    }
+
+
+@app.post("/api/banking-bridge/link/{portfolio_id}/{depot_id}")
+async def link_portfolio_to_depot(portfolio_id: int, depot_id: int) -> Dict[str, Any]:
+    """Verknuepft ein bestehendes Portfolio manuell mit einem Banking Bridge Depot."""
+    row = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+
+    # Pruefen ob Depot-ID bereits vergeben
+    conflict = _conn.execute(
+        "SELECT id, name FROM portfolios WHERE banking_bridge_depot_id=? AND id<>?",
+        (depot_id, portfolio_id),
+    ).fetchone()
+    if conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Depot ist bereits mit Portfolio '{conflict['name']}' (#{conflict['id']}) verknuepft",
+        )
+
+    _conn.execute(
+        "UPDATE portfolios SET banking_bridge_depot_id=? WHERE id=?",
+        (depot_id, portfolio_id),
+    )
+    _conn.commit()
+    return {"portfolio_id": portfolio_id, "depot_id": depot_id, "linked": True}
+
+
+@app.post("/api/banking-bridge/unlink/{portfolio_id}")
+async def unlink_portfolio_from_depot(portfolio_id: int) -> Dict[str, Any]:
+    """Entfernt die Verknuepfung eines Portfolios mit einem Banking Bridge Depot."""
+    row = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+
+    _conn.execute(
+        "UPDATE portfolios SET banking_bridge_depot_id=NULL WHERE id=?",
+        (portfolio_id,),
+    )
+    _conn.commit()
+    return {"portfolio_id": portfolio_id, "unlinked": True}
+
+
+# ──────────────────── Banking Bridge Integration ────────────────────
+
+
+def _get_bb_client() -> BankingBridgeClient:
+    url = (get_setting(_conn, "banking_bridge_url", "") or "").strip()
+    return BankingBridgeClient(BankingBridgeSettings(base_url=url))
+
+
+class BankingBridgeSettingsUpdate(BaseModel):
+    url: Optional[str] = None
+
+
+@app.get("/api/settings/banking-bridge")
+async def get_banking_bridge_settings() -> Dict[str, Any]:
+    url = (get_setting(_conn, "banking_bridge_url", "") or "").strip()
+    return {"url": url}
+
+
+@app.put("/api/settings/banking-bridge")
+async def update_banking_bridge_settings(body: BankingBridgeSettingsUpdate) -> Dict[str, Any]:
+    if body.url is not None:
+        set_setting(_conn, "banking_bridge_url", (body.url or "").strip())
+    url = (get_setting(_conn, "banking_bridge_url", "") or "").strip()
+    return {"url": url}
+
+
+@app.get("/api/banking-bridge/status")
+async def banking_bridge_status() -> Dict[str, Any]:
+    try:
+        client = _get_bb_client()
+        result = await asyncio.to_thread(client.check_connection)
+        return {"connected": True, **result}
+    except Exception as exc:
+        return {"connected": False, "error": str(exc)}
+
+
+@app.get("/api/banking-bridge/depots")
+async def banking_bridge_list_depots() -> Dict[str, Any]:
+    client = _get_bb_client()
+    try:
+        depots = await asyncio.to_thread(client.list_depots)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # Bestehende Verknuepfungen laden
+    linked_rows = _conn.execute(
+        "SELECT id, banking_bridge_depot_id FROM portfolios WHERE banking_bridge_depot_id IS NOT NULL"
+    ).fetchall()
+    linked_map: Dict[int, int] = {int(r["banking_bridge_depot_id"]): int(r["id"]) for r in linked_rows}
+
+    result = []
+    for d in depots:
+        entry: Dict[str, Any] = {
+            "id": d.id,
+            "name": d.name,
+            "account_number": d.account_number,
+            "sub_account": d.sub_account,
+            "bank": d.bank,
+            "bank_code": d.bank_code,
+            "total_value": d.total_value,
+            "currency": d.currency,
+            "last_update": d.last_update,
+            "linked_portfolio_id": linked_map.get(d.id),
+        }
+        result.append(entry)
+    return {"depots": result}
+
+
+@app.get("/api/banking-bridge/depots/{depot_id}/holdings")
+async def banking_bridge_depot_holdings(depot_id: int) -> Dict[str, Any]:
+    client = _get_bb_client()
+    try:
+        holdings = await asyncio.to_thread(client.get_holdings, depot_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {
+        "holdings": [
+            {
+                "isin": h.isin,
+                "wkn": h.wkn,
+                "name": h.name,
+                "quantity": h.quantity,
+                "currency": h.currency,
+                "current_price": h.current_price,
+                "purchase_price": h.purchase_price,
+                "total_value": h.total_value,
+                "profit_loss": h.profit_loss,
+                "profit_loss_percent": h.profit_loss_percent,
+                "price_date": h.price_date,
+                "updated_at": h.updated_at,
+            }
+            for h in holdings
+        ]
+    }
+
+
+def _get_or_create_instrument_for_holding(
+    isin: str, name: str, currency: str, wkn: Optional[str] = None
+) -> int:
+    """Findet oder erstellt ein Instrument fuer einen Banking Bridge Holding."""
+    isin_upper = isin.strip().upper()
+    if not isin_upper:
+        raise ValueError("ISIN darf nicht leer sein")
+
+    # Suche nach existierendem Instrument mit gleicher ISIN
+    row = _conn.execute(
+        "SELECT id, code, name FROM instruments WHERE isin=? AND (type IS NULL OR type='asset')",
+        (isin_upper,),
+    ).fetchone()
+    if row:
+        # Name aktualisieren, falls nur Code als Name gesetzt
+        if name and (dict(row).get("name") or "").strip() == dict(row).get("code", ""):
+            _conn.execute("UPDATE instruments SET name=? WHERE id=?", (name, row["id"]))
+        return int(row["id"])
+
+    # Suche ueber Code = ISIN
+    row = _conn.execute(
+        "SELECT id, name FROM instruments WHERE code=? AND (type IS NULL OR type='asset')",
+        (isin_upper,),
+    ).fetchone()
+    if row:
+        # ISIN nachsetzen
+        _conn.execute("UPDATE instruments SET isin=? WHERE id=? AND (isin IS NULL OR isin='')", (isin_upper, row["id"]))
+        if name and (dict(row).get("name") or "").strip() == isin_upper:
+            _conn.execute("UPDATE instruments SET name=? WHERE id=?", (name, row["id"]))
+        return int(row["id"])
+
+    # Neues Instrument anlegen
+    cur = _conn.execute(
+        "INSERT INTO instruments(code, name, currency, type, isin, ls_item) VALUES (?,?,?,?,?,NULL)",
+        (isin_upper, name or isin_upper, (currency or "EUR").strip().upper(), "asset", isin_upper),
+    )
+    instrument_id = int(cur.lastrowid)
+
+    # Automatisch Tradegate-Kursquelle anlegen (ISIN-basiert)
+    try:
+        _conn.execute(
+            "INSERT INTO instrument_sources(instrument_id, source, source_code, priority) VALUES (?,?,?,?)",
+            (instrument_id, "tradegate", isin_upper, 10),
+        )
+    except Exception:
+        pass
+    # Automatisch Lightstreamer-Kursquelle anlegen (ISIN-basiert)
+    try:
+        _conn.execute(
+            "INSERT INTO instrument_sources(instrument_id, source, source_code, priority) VALUES (?,?,?,?)",
+            (instrument_id, "lightstreamer", isin_upper, 20),
+        )
+    except Exception:
+        pass
+
+    return instrument_id
+
+
+class BankingBridgeImportRequest(BaseModel):
+    depot_id: int
+    portfolio_name: Optional[str] = None
+
+
+@app.post("/api/banking-bridge/import")
+async def banking_bridge_import_depot(body: BankingBridgeImportRequest) -> Dict[str, Any]:
+    """
+    Importiert ein Banking Bridge Depot als neues Portfolio.
+    Erstellt bei Bedarf Instrumente und Positionen.
+    """
+    client = _get_bb_client()
+    depot_id = body.depot_id
+
+    # Pruefen ob bereits verknuepft
+    existing = _conn.execute(
+        "SELECT id, name FROM portfolios WHERE banking_bridge_depot_id=?", (depot_id,)
+    ).fetchone()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Depot {depot_id} ist bereits mit Portfolio '{existing['name']}' (#{existing['id']}) verknuepft",
+        )
+
+    # Depot und Holdings laden
+    try:
+        depot = await asyncio.to_thread(client.get_depot, depot_id)
+        holdings = await asyncio.to_thread(client.get_holdings, depot_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    portfolio_name = (body.portfolio_name or "").strip() or f"{depot.name} ({depot.bank})"
+    portfolio_currency = (depot.currency or "EUR").strip().upper()
+
+    # Portfolio anlegen
+    max_row = _conn.execute("SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM portfolios").fetchone()
+    next_order = int(max_row["max_order"] if max_row else -1) + 1
+    cur = _conn.execute(
+        "INSERT INTO portfolios(name, currency, sort_order, banking_bridge_depot_id) VALUES (?,?,?,?)",
+        (portfolio_name, portfolio_currency, next_order, depot_id),
+    )
+    portfolio_id = int(cur.lastrowid)
+
+    # Positionen anlegen
+    imported_count = 0
+    skipped: List[str] = []
+    for idx, h in enumerate(holdings):
+        if not h.isin or h.quantity <= 0:
+            skipped.append(f"{h.name or 'Unbekannt'} (keine ISIN oder Menge<=0)")
+            continue
+        try:
+            instrument_id = _get_or_create_instrument_for_holding(
+                isin=h.isin,
+                name=h.name,
+                currency=h.currency,
+                wkn=h.wkn,
+            )
+            entry_price = h.purchase_price if h.purchase_price and h.purchase_price > 0 else 0.01
+            pos_currency = (h.currency or portfolio_currency).strip().upper()
+            _conn.execute(
+                "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency, sort_order) VALUES (?,?,?,?,?,?,?,?)",
+                (portfolio_id, instrument_id, h.isin.upper(), h.name or None, h.quantity, entry_price, pos_currency, idx),
+            )
+            imported_count += 1
+        except Exception as exc:
+            skipped.append(f"{h.name or h.isin}: {exc}")
+
+    _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+
+    return {
+        "portfolio_id": portfolio_id,
+        "portfolio_name": portfolio_name,
+        "depot_id": depot_id,
+        "imported_positions": imported_count,
+        "skipped": skipped,
+        "total_holdings": len(holdings),
+    }
+
+
+@app.post("/api/banking-bridge/sync/{portfolio_id}")
+async def banking_bridge_sync_portfolio(portfolio_id: int) -> Dict[str, Any]:
+    """
+    Synchronisiert ein verknuepftes Portfolio mit dem Banking Bridge Depot.
+    Aktualisiert bestehende Positionen (Menge, Entry) und fuegt neue hinzu.
+    Entfernt Positionen, die im Depot nicht mehr vorhanden sind.
+    """
+    # Portfolio mit BB-Verknuepfung laden
+    prow = _conn.execute(
+        "SELECT id, name, currency, banking_bridge_depot_id FROM portfolios WHERE id=?",
+        (portfolio_id,),
+    ).fetchone()
+    if not prow:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+    depot_id = prow["banking_bridge_depot_id"]
+    if not depot_id:
+        raise HTTPException(status_code=400, detail="Portfolio ist nicht mit einem Banking Bridge Depot verknuepft")
+    portfolio_currency = (prow["currency"] or "EUR").strip().upper()
+
+    # Holdings vom Banking Bridge laden
+    client = _get_bb_client()
+    try:
+        holdings = await asyncio.to_thread(client.get_holdings, int(depot_id))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # Bestehende Positionen laden
+    existing_positions = _conn.execute(
+        """
+        SELECT pos.id, pos.instrument_id, pos.isin, pos.quantity, pos.entry_price, pos.currency,
+               instr.isin AS instrument_isin
+        FROM positions pos
+        LEFT JOIN instruments instr ON instr.id = pos.instrument_id
+        WHERE pos.portfolio_id=?
+        """,
+        (portfolio_id,),
+    ).fetchall()
+
+    # Map: ISIN -> bestehende Position
+    existing_by_isin: Dict[str, Dict[str, Any]] = {}
+    for p in existing_positions:
+        isin_key = (p["instrument_isin"] or p["isin"] or "").strip().upper()
+        if isin_key:
+            existing_by_isin[isin_key] = dict(p)
+
+    # Holdings-ISINs Set
+    holding_isins: set[str] = set()
+    for h in holdings:
+        if h.isin:
+            holding_isins.add(h.isin.strip().upper())
+
+    added = 0
+    updated = 0
+    removed = 0
+    skipped: List[str] = []
+    max_sort = _conn.execute(
+        "SELECT COALESCE(MAX(sort_order), -1) AS mx FROM positions WHERE portfolio_id=?",
+        (portfolio_id,),
+    ).fetchone()
+    next_sort = int(max_sort["mx"] if max_sort else -1) + 1
+
+    for h in holdings:
+        if not h.isin or h.quantity <= 0:
+            skipped.append(f"{h.name or 'Unbekannt'} (keine ISIN oder Menge<=0)")
+            continue
+
+        isin_upper = h.isin.strip().upper()
+        entry_price = h.purchase_price if h.purchase_price and h.purchase_price > 0 else 0.01
+        pos_currency = (h.currency or portfolio_currency).strip().upper()
+
+        if isin_upper in existing_by_isin:
+            # Position aktualisieren
+            pos = existing_by_isin[isin_upper]
+            changes: List[str] = []
+            values: List[Any] = []
+
+            if abs(float(pos["quantity"]) - h.quantity) > 1e-6:
+                changes.append("quantity=?")
+                values.append(h.quantity)
+            if entry_price and abs(float(pos["entry_price"]) - entry_price) > 1e-6:
+                changes.append("entry_price=?")
+                values.append(entry_price)
+            if pos_currency and pos_currency != (pos["currency"] or "EUR").strip().upper():
+                changes.append("currency=?")
+                values.append(pos_currency)
+
+            if changes:
+                values.append(pos["id"])
+                _conn.execute(
+                    f"UPDATE positions SET {', '.join(changes)} WHERE id=?",
+                    tuple(values),
+                )
+                updated += 1
+        else:
+            # Neue Position anlegen
+            try:
+                instrument_id = _get_or_create_instrument_for_holding(
+                    isin=h.isin,
+                    name=h.name,
+                    currency=h.currency,
+                    wkn=h.wkn,
+                )
+                _conn.execute(
+                    "INSERT INTO positions(portfolio_id, instrument_id, isin, name, quantity, entry_price, currency, sort_order) VALUES (?,?,?,?,?,?,?,?)",
+                    (portfolio_id, instrument_id, isin_upper, h.name or None, h.quantity, entry_price, pos_currency, next_sort),
+                )
+                next_sort += 1
+                added += 1
+            except Exception as exc:
+                skipped.append(f"{h.name or h.isin}: {exc}")
+
+    # Positionen entfernen, die nicht mehr im Depot sind
+    for isin_key, pos in existing_by_isin.items():
+        if isin_key not in holding_isins:
+            _conn.execute("DELETE FROM positions WHERE id=?", (pos["id"],))
+            removed += 1
+
+    _conn.commit()
+    stream_manager.mark_dirty()
+    _publish_mqtt_snapshot()
+
+    return {
+        "portfolio_id": portfolio_id,
+        "depot_id": int(depot_id),
+        "added": added,
+        "updated": updated,
+        "removed": removed,
+        "skipped": skipped,
+        "total_holdings": len(holdings),
+    }
+
+
+@app.post("/api/banking-bridge/unlink/{portfolio_id}")
+async def banking_bridge_unlink_portfolio(portfolio_id: int) -> Dict[str, Any]:
+    """Entfernt die Verknuepfung eines Portfolios mit einem Banking Bridge Depot."""
+    prow = _conn.execute(
+        "SELECT id, name, banking_bridge_depot_id FROM portfolios WHERE id=?",
+        (portfolio_id,),
+    ).fetchone()
+    if not prow:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+    if not prow["banking_bridge_depot_id"]:
+        raise HTTPException(status_code=400, detail="Portfolio ist nicht verknuepft")
+    _conn.execute("UPDATE portfolios SET banking_bridge_depot_id=NULL WHERE id=?", (portfolio_id,))
+    _conn.commit()
+    return {"portfolio_id": portfolio_id, "unlinked": True}
+
+
+@app.post("/api/banking-bridge/link/{portfolio_id}")
+async def banking_bridge_link_portfolio(portfolio_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Verknuepft ein bestehendes Portfolio mit einem Banking Bridge Depot."""
+    depot_id = body.get("depot_id")
+    if not depot_id:
+        raise HTTPException(status_code=400, detail="depot_id ist erforderlich")
+    depot_id = int(depot_id)
+
+    prow = _conn.execute("SELECT id, name FROM portfolios WHERE id=?", (portfolio_id,)).fetchone()
+    if not prow:
+        raise HTTPException(status_code=404, detail="Portfolio nicht gefunden")
+
+    # Pruefen ob Depot bereits verknuepft
+    existing = _conn.execute(
+        "SELECT id, name FROM portfolios WHERE banking_bridge_depot_id=? AND id<>?",
+        (depot_id, portfolio_id),
+    ).fetchone()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Depot {depot_id} ist bereits mit Portfolio '{existing['name']}' (#{existing['id']}) verknuepft",
+        )
+
+    _conn.execute("UPDATE portfolios SET banking_bridge_depot_id=? WHERE id=?", (depot_id, portfolio_id))
+    _conn.commit()
+    return {"portfolio_id": portfolio_id, "depot_id": depot_id, "linked": True}

@@ -130,6 +130,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _add_column("portfolios", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
     _add_column("positions", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
     _add_column("watchlist", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 0")
+    _add_column("portfolios", "banking_bridge_depot_id", "banking_bridge_depot_id INTEGER")
 
     # Minimal-"Migrationen" für bestehende DBs (ALTER TABLE wenn Spalte fehlt)
     try:
@@ -197,6 +198,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     _set_default_setting(
         "quote_source_priority",
         (os.getenv("QUOTE_SOURCE_PRIORITY") or "").strip() or "lightstreamer,tradegate,bitfinex",
+    )
+
+    _set_default_setting(
+        "banking_bridge_url",
+        (os.getenv("BANKING_BRIDGE_URL") or "").strip() or "",
     )
 
     _set_default_setting(
