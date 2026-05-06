@@ -1696,7 +1696,9 @@ async def _shutdown() -> None:
         stream_manager._heartbeat_task.cancel()
         try:
             await stream_manager._heartbeat_task
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
+            pass
+        except Exception:
             pass
     if stream_manager.tradegate_poller:
         stream_manager.tradegate_poller.stop()
@@ -2650,7 +2652,7 @@ async def ws_dashboard(ws: WebSocket):
             text = await ws.receive_text()
             try:
                 msg = json.loads(text)
-            except (ValueError, TypeError):
+            except ValueError:
                 msg = None
             if isinstance(msg, dict) and msg.get("type") == "ping":
                 try:
