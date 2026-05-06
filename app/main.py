@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import random
 import re
@@ -730,6 +731,7 @@ class StreamManager:
         self._lock = asyncio.Lock()
         self._dirty = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
         self.quote_router = QuoteRouter(load_source_priority())
         self.lightstreamer_enabled = SOURCE_LIGHTSTREAMER in self.quote_router.default_priority
@@ -755,12 +757,34 @@ class StreamManager:
                 self.tradegate_poller.start()
             if self.bitfinex_stream:
                 self.bitfinex_stream.start()
+            self._ensure_heartbeat()
             return
         self._task = asyncio.create_task(self._run())
         if self.tradegate_poller:
             self.tradegate_poller.start()
         if self.bitfinex_stream:
             self.bitfinex_stream.start()
+        self._ensure_heartbeat()
+
+    def _ensure_heartbeat(self) -> None:
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            return
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self) -> None:
+        """Sendet alle WS_HEARTBEAT_INTERVAL_S Sekunden einen Ping an alle verbundenen Clients,
+        damit Reverse-Proxies (nginx, Traefik) und der HA-WS-Client die Verbindung nicht als
+        idle einstufen und nach ~60 s trennen."""
+        try:
+            while True:
+                await asyncio.sleep(WS_HEARTBEAT_INTERVAL_S)
+                if not self.clients:
+                    continue
+                await self.broadcast({"type": "ping", "ts": now_iso()})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("WebSocket heartbeat loop error")
 
     def reload_settings(self) -> None:
         priorities = load_source_priority()
@@ -1567,6 +1591,9 @@ class PortfolioUpdate(BaseModel):
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
+APP_VERSION = "1.0.0"
+WS_HEARTBEAT_INTERVAL_S = 25.0
+
 
 def _normalize_code(code: str) -> str:
     code = (code or "").strip()
@@ -1664,6 +1691,12 @@ async def _shutdown() -> None:
         try:
             await stream_manager._task
         except Exception:
+            pass
+    if stream_manager._heartbeat_task and not stream_manager._heartbeat_task.done():
+        stream_manager._heartbeat_task.cancel()
+        try:
+            await stream_manager._heartbeat_task
+        except (Exception, asyncio.CancelledError):
             pass
     if stream_manager.tradegate_poller:
         stream_manager.tradegate_poller.stop()
@@ -2612,11 +2645,39 @@ async def ws_dashboard(ws: WebSocket):
     try:
         while True:
             # Dashboard sendet aktuell keine Commands; wir halten die Verbindung offen.
-            await ws.receive_text()
+            # Eingehende {"type":"ping"} beantworten wir mit {"type":"pong"}, damit
+            # Clients (z. B. die HA-Integration) Liveness aktiv prüfen können.
+            text = await ws.receive_text()
+            try:
+                msg = json.loads(text)
+            except (ValueError, TypeError):
+                msg = None
+            if isinstance(msg, dict) and msg.get("type") == "ping":
+                try:
+                    await ws.send_json({"type": "pong", "ts": now_iso()})
+                except Exception:
+                    break
     except WebSocketDisconnect:
         pass
     finally:
         await stream_manager.remove_client(ws)
+
+
+@app.get("/api/health")
+async def api_health() -> Dict[str, Any]:
+    """Lightweight health probe für die Home-Assistant-Integration und Reverse-Proxies."""
+    return {
+        "status": "ok",
+        "mqtt_enabled": _mqtt_is_enabled(),
+        "mqtt_connected": bool(_mqtt),
+        "ws_clients": len(stream_manager.clients),
+        "ts": now_iso(),
+    }
+
+
+@app.get("/api/version")
+async def api_version() -> Dict[str, Any]:
+    return {"version": APP_VERSION}
 
 
 @app.get("/api/mqtt")
