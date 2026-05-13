@@ -1682,6 +1682,10 @@ async def _startup() -> None:
         _mqtt_connect_if_enabled()
     except Exception as e:
         logger.warning("MQTT connect failed: %s", e)
+    # Banking Bridge Auto-Sync starten (Default: alle 30 Minuten).
+    global _bb_auto_sync_task
+    if _bb_auto_sync_task is None or _bb_auto_sync_task.done():
+        _bb_auto_sync_task = asyncio.create_task(_bb_auto_sync_loop())
 
 
 @app.on_event("shutdown")
@@ -1704,6 +1708,16 @@ async def _shutdown() -> None:
         stream_manager.tradegate_poller.stop()
     if stream_manager.bitfinex_stream:
         stream_manager.bitfinex_stream.stop()
+    # Banking Bridge Auto-Sync Task stoppen
+    global _bb_auto_sync_task
+    if _bb_auto_sync_task and not _bb_auto_sync_task.done():
+        _bb_auto_sync_task.cancel()
+        try:
+            await _bb_auto_sync_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
     _mqtt_disconnect()
 
 
@@ -3462,12 +3476,14 @@ async def banking_bridge_import_depot(body: BankingBridgeImportRequest) -> Dict[
     }
 
 
-@app.post("/api/banking-bridge/sync/{portfolio_id}")
-async def banking_bridge_sync_portfolio(portfolio_id: int) -> Dict[str, Any]:
+async def _sync_portfolio_with_banking_bridge(portfolio_id: int) -> Dict[str, Any]:
     """
-    Synchronisiert ein verknuepftes Portfolio mit dem Banking Bridge Depot.
-    Aktualisiert bestehende Positionen (Menge, Entry) und fuegt neue hinzu.
-    Entfernt Positionen, die im Depot nicht mehr vorhanden sind.
+    Interne Hilfsfunktion: Synchronisiert ein verknuepftes Portfolio
+    mit dem Banking Bridge Depot. Wird sowohl vom HTTP-Endpunkt als auch
+    vom Auto-Sync-Hintergrund-Task verwendet.
+
+    Wirft HTTPException bei Fehlern, damit der HTTP-Endpunkt sie direkt
+    durchreichen kann. Hintergrund-Task faengt diese ab.
     """
     # Portfolio mit BB-Verknuepfung laden
     prow = _conn.execute(
@@ -3592,6 +3608,252 @@ async def banking_bridge_sync_portfolio(portfolio_id: int) -> Dict[str, Any]:
         "skipped": skipped,
         "total_holdings": len(holdings),
     }
+
+
+@app.post("/api/banking-bridge/sync/{portfolio_id}")
+async def banking_bridge_sync_portfolio(portfolio_id: int) -> Dict[str, Any]:
+    """
+    Synchronisiert ein verknuepftes Portfolio mit dem Banking Bridge Depot.
+    Aktualisiert bestehende Positionen (Menge, Entry) und fuegt neue hinzu.
+    Entfernt Positionen, die im Depot nicht mehr vorhanden sind.
+    """
+    return await _sync_portfolio_with_banking_bridge(portfolio_id)
+
+
+# ──────────────────── Banking Bridge Auto-Sync ────────────────────
+
+DEFAULT_BB_AUTO_SYNC_ENABLED = True
+DEFAULT_BB_AUTO_SYNC_INTERVAL_MIN = 30
+MIN_BB_AUTO_SYNC_INTERVAL_MIN = 1
+MAX_BB_AUTO_SYNC_INTERVAL_MIN = 24 * 60  # 1 Tag
+
+# Laufzeit-Status des Auto-Sync-Tasks
+_bb_auto_sync_task: Optional[asyncio.Task] = None
+_bb_auto_sync_wakeup: Optional[asyncio.Event] = None
+_bb_auto_sync_state: Dict[str, Any] = {
+    "last_run_at": None,        # ISO-Timestamp des letzten Laufs (Start)
+    "last_run_finished_at": None,
+    "last_run_status": None,    # "ok" | "partial" | "error" | None
+    "last_run_message": None,
+    "last_run_results": [],     # Liste pro Portfolio: {portfolio_id, status, ...}
+    "next_run_at": None,        # geschaetzter naechster Lauf (ISO)
+}
+
+
+def _bb_auto_sync_enabled() -> bool:
+    return get_bool(_conn, "banking_bridge_auto_sync_enabled", DEFAULT_BB_AUTO_SYNC_ENABLED)
+
+
+def _bb_auto_sync_interval_min() -> int:
+    val = get_int(_conn, "banking_bridge_auto_sync_interval_minutes", DEFAULT_BB_AUTO_SYNC_INTERVAL_MIN)
+    if val < MIN_BB_AUTO_SYNC_INTERVAL_MIN:
+        val = MIN_BB_AUTO_SYNC_INTERVAL_MIN
+    elif val > MAX_BB_AUTO_SYNC_INTERVAL_MIN:
+        val = MAX_BB_AUTO_SYNC_INTERVAL_MIN
+    return val
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _run_banking_bridge_auto_sync_once() -> Dict[str, Any]:
+    """Synchronisiert alle verknuepften Portfolios einmalig."""
+    rows = _conn.execute(
+        "SELECT id, name FROM portfolios WHERE banking_bridge_depot_id IS NOT NULL ORDER BY sort_order, id"
+    ).fetchall()
+
+    started_at = _now_iso()
+    _bb_auto_sync_state["last_run_at"] = started_at
+    _bb_auto_sync_state["last_run_finished_at"] = None
+    _bb_auto_sync_state["last_run_status"] = None
+    _bb_auto_sync_state["last_run_message"] = None
+
+    results: List[Dict[str, Any]] = []
+    error_count = 0
+    ok_count = 0
+
+    if not rows:
+        _bb_auto_sync_state["last_run_results"] = []
+        _bb_auto_sync_state["last_run_finished_at"] = _now_iso()
+        _bb_auto_sync_state["last_run_status"] = "ok"
+        _bb_auto_sync_state["last_run_message"] = "Keine verknuepften Portfolios."
+        return {"portfolios": 0, "ok": 0, "errors": 0, "results": []}
+
+    for r in rows:
+        pid = int(r["id"])
+        pname = r["name"]
+        try:
+            res = await _sync_portfolio_with_banking_bridge(pid)
+            results.append({
+                "portfolio_id": pid,
+                "portfolio_name": pname,
+                "status": "ok",
+                "added": res.get("added", 0),
+                "updated": res.get("updated", 0),
+                "removed": res.get("removed", 0),
+                "skipped": len(res.get("skipped", []) or []),
+                "total_holdings": res.get("total_holdings", 0),
+            })
+            ok_count += 1
+        except HTTPException as exc:
+            results.append({
+                "portfolio_id": pid,
+                "portfolio_name": pname,
+                "status": "error",
+                "error": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+                "status_code": exc.status_code,
+            })
+            error_count += 1
+            logger.warning("Auto-Sync Banking Bridge: Portfolio %s fehlgeschlagen: %s", pid, exc.detail)
+        except Exception as exc:
+            results.append({
+                "portfolio_id": pid,
+                "portfolio_name": pname,
+                "status": "error",
+                "error": str(exc),
+            })
+            error_count += 1
+            logger.warning("Auto-Sync Banking Bridge: Portfolio %s fehlgeschlagen: %s", pid, exc)
+
+    _bb_auto_sync_state["last_run_results"] = results
+    _bb_auto_sync_state["last_run_finished_at"] = _now_iso()
+    if error_count == 0:
+        _bb_auto_sync_state["last_run_status"] = "ok"
+        _bb_auto_sync_state["last_run_message"] = f"{ok_count} Portfolio(s) synchronisiert."
+    elif ok_count == 0:
+        _bb_auto_sync_state["last_run_status"] = "error"
+        _bb_auto_sync_state["last_run_message"] = f"Alle {error_count} Synchronisierungen fehlgeschlagen."
+    else:
+        _bb_auto_sync_state["last_run_status"] = "partial"
+        _bb_auto_sync_state["last_run_message"] = f"{ok_count} OK, {error_count} fehlgeschlagen."
+
+    return {
+        "portfolios": len(rows),
+        "ok": ok_count,
+        "errors": error_count,
+        "results": results,
+    }
+
+
+async def _bb_auto_sync_loop() -> None:
+    """Hintergrund-Task: synchronisiert verknuepfte Depots in konfigurierbarem Intervall."""
+    global _bb_auto_sync_wakeup
+    _bb_auto_sync_wakeup = asyncio.Event()
+    logger.info("Banking Bridge Auto-Sync-Loop gestartet.")
+
+    # Kurze Initialverzoegerung, damit der App-Start nicht blockiert wird
+    try:
+        await asyncio.sleep(15.0)
+    except asyncio.CancelledError:
+        logger.info("Banking Bridge Auto-Sync-Loop abgebrochen (initial).")
+        return
+
+    while True:
+        try:
+            interval_min = _bb_auto_sync_interval_min()
+            enabled = _bb_auto_sync_enabled()
+
+            if enabled:
+                # Nur ausfuehren, wenn URL konfiguriert ist
+                bb_url = (get_setting(_conn, "banking_bridge_url", "") or "").strip()
+                if bb_url:
+                    try:
+                        await _run_banking_bridge_auto_sync_once()
+                    except Exception as exc:
+                        logger.warning("Banking Bridge Auto-Sync-Lauf fehlgeschlagen: %s", exc)
+                        _bb_auto_sync_state["last_run_finished_at"] = _now_iso()
+                        _bb_auto_sync_state["last_run_status"] = "error"
+                        _bb_auto_sync_state["last_run_message"] = str(exc)
+                else:
+                    logger.debug("Banking Bridge Auto-Sync uebersprungen: keine URL konfiguriert.")
+            else:
+                logger.debug("Banking Bridge Auto-Sync deaktiviert.")
+
+            # Naechsten Lauf planen
+            wait_s = max(MIN_BB_AUTO_SYNC_INTERVAL_MIN, interval_min) * 60.0
+            next_dt = datetime.now(timezone.utc).timestamp() + wait_s
+            _bb_auto_sync_state["next_run_at"] = datetime.fromtimestamp(next_dt, tz=timezone.utc).isoformat()
+
+            # Schlafen, aber durch wakeup unterbrechbar (z.B. nach Settings-Aenderung
+            # oder bei manueller Auto-Sync-Ausloesung)
+            try:
+                assert _bb_auto_sync_wakeup is not None
+                await asyncio.wait_for(_bb_auto_sync_wakeup.wait(), timeout=wait_s)
+                _bb_auto_sync_wakeup.clear()
+            except asyncio.TimeoutError:
+                pass
+        except asyncio.CancelledError:
+            logger.info("Banking Bridge Auto-Sync-Loop beendet.")
+            return
+        except Exception as exc:
+            logger.warning("Banking Bridge Auto-Sync-Loop unerwarteter Fehler: %s", exc)
+            try:
+                await asyncio.sleep(60.0)
+            except asyncio.CancelledError:
+                return
+
+
+def _bb_auto_sync_wake() -> None:
+    """Weckt den Auto-Sync-Task auf, damit er Settings/Trigger sofort beruecksichtigt."""
+    if _bb_auto_sync_wakeup is not None:
+        try:
+            _bb_auto_sync_wakeup.set()
+        except Exception:
+            pass
+
+
+class BankingBridgeAutoSyncUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = Field(default=None, ge=MIN_BB_AUTO_SYNC_INTERVAL_MIN, le=MAX_BB_AUTO_SYNC_INTERVAL_MIN)
+
+
+def _bb_auto_sync_settings_payload() -> Dict[str, Any]:
+    return {
+        "enabled": _bb_auto_sync_enabled(),
+        "interval_minutes": _bb_auto_sync_interval_min(),
+        "min_interval_minutes": MIN_BB_AUTO_SYNC_INTERVAL_MIN,
+        "max_interval_minutes": MAX_BB_AUTO_SYNC_INTERVAL_MIN,
+        "running": _bb_auto_sync_task is not None and not _bb_auto_sync_task.done(),
+        "last_run_at": _bb_auto_sync_state.get("last_run_at"),
+        "last_run_finished_at": _bb_auto_sync_state.get("last_run_finished_at"),
+        "last_run_status": _bb_auto_sync_state.get("last_run_status"),
+        "last_run_message": _bb_auto_sync_state.get("last_run_message"),
+        "last_run_results": _bb_auto_sync_state.get("last_run_results", []),
+        "next_run_at": _bb_auto_sync_state.get("next_run_at"),
+    }
+
+
+@app.get("/api/settings/banking-bridge/auto-sync")
+async def get_banking_bridge_auto_sync_settings() -> Dict[str, Any]:
+    return _bb_auto_sync_settings_payload()
+
+
+@app.put("/api/settings/banking-bridge/auto-sync")
+async def update_banking_bridge_auto_sync_settings(body: BankingBridgeAutoSyncUpdate) -> Dict[str, Any]:
+    if body.enabled is not None:
+        set_bool(_conn, "banking_bridge_auto_sync_enabled", bool(body.enabled))
+    if body.interval_minutes is not None:
+        interval = int(body.interval_minutes)
+        if interval < MIN_BB_AUTO_SYNC_INTERVAL_MIN:
+            interval = MIN_BB_AUTO_SYNC_INTERVAL_MIN
+        if interval > MAX_BB_AUTO_SYNC_INTERVAL_MIN:
+            interval = MAX_BB_AUTO_SYNC_INTERVAL_MIN
+        set_setting(_conn, "banking_bridge_auto_sync_interval_minutes", str(interval))
+    # Aenderungen sofort wirksam machen (naechsten Schlaf abbrechen)
+    _bb_auto_sync_wake()
+    return _bb_auto_sync_settings_payload()
+
+
+@app.post("/api/banking-bridge/auto-sync/run")
+async def trigger_banking_bridge_auto_sync_now() -> Dict[str, Any]:
+    """
+    Loest sofort einen Auto-Sync-Lauf fuer alle verknuepften Portfolios aus,
+    unabhaengig vom Intervall. Manuelle Einzel-Synchronisierung bleibt
+    weiterhin ueber /api/banking-bridge/sync/{portfolio_id} moeglich.
+    """
+    result = await _run_banking_bridge_auto_sync_once()
+    return result
 
 
 @app.post("/api/banking-bridge/unlink/{portfolio_id}")
