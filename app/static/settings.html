@@ -298,6 +298,29 @@
 
           <div id="bbStatus" class="status info" style="margin-top: 12px; display: none;"></div>
 
+          <div style="margin-top: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 6px;">
+            <div class="inline-form" style="justify-content: space-between; align-items: center;">
+              <h3 style="margin: 0;">Automatische Synchronisierung</h3>
+              <button id="runAutoSyncBtn" class="button ghost" style="font-size:13px;">Jetzt ausführen</button>
+            </div>
+            <div class="sub" style="margin-top: 4px;">Verknüpfte Depots werden im konfigurierten Intervall automatisch synchronisiert. Manuelle Synchronisierung pro Depot bleibt verfügbar.</div>
+
+            <div class="form-grid" style="margin-top: 12px;">
+              <div class="field">
+                <label class="checkbox"><input id="bbAutoSyncEnabled" type="checkbox" /> Auto-Sync aktiviert</label>
+              </div>
+              <div class="field">
+                <label for="bbAutoSyncInterval">Intervall (Minuten)</label>
+                <input id="bbAutoSyncInterval" type="number" min="1" max="1440" step="1" />
+              </div>
+              <div class="field" style="grid-column: span 2;">
+                <button id="saveAutoSyncBtn" class="button">Speichern</button>
+              </div>
+            </div>
+
+            <div id="bbAutoSyncStatus" class="sub" style="margin-top: 8px;">Status wird geladen…</div>
+          </div>
+
           <div style="margin-top: 16px;">
             <div class="inline-form" style="justify-content: space-between; align-items: center;">
               <h3 style="margin: 0;">Verfuegbare Depots</h3>
@@ -584,7 +607,82 @@
     testBbBtn.onclick = () => testBbConnection().catch(e => setBbStatus("error", String(e.message || e)));
     loadDepotsBtn.onclick = () => loadDepots().catch(e => setBbStatus("error", String(e.message || e)));
 
-    Promise.all([loadMqttStatus(), loadMqttConfig(), loadBbConfig()])
+    // ---- Banking Bridge Auto-Sync ----
+    const bbAutoSyncEnabledEl = document.getElementById("bbAutoSyncEnabled");
+    const bbAutoSyncIntervalEl = document.getElementById("bbAutoSyncInterval");
+    const saveAutoSyncBtn = document.getElementById("saveAutoSyncBtn");
+    const runAutoSyncBtn = document.getElementById("runAutoSyncBtn");
+    const bbAutoSyncStatusEl = document.getElementById("bbAutoSyncStatus");
+
+    function fmtDate(iso) {
+      if (!iso) return "—";
+      try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleString("de-DE");
+      } catch (_) { return iso; }
+    }
+
+    function renderAutoSyncStatus(s) {
+      if (!s) {
+        bbAutoSyncStatusEl.textContent = "Status nicht verfügbar.";
+        return;
+      }
+      const parts = [];
+      parts.push(`Letzter Lauf: ${fmtDate(s.last_run_finished_at || s.last_run_at)}`);
+      if (s.last_run_status) {
+        parts.push(`Status: ${s.last_run_status}${s.last_run_message ? " – " + s.last_run_message : ""}`);
+      }
+      parts.push(`Nächster Lauf: ${fmtDate(s.next_run_at)}`);
+      bbAutoSyncStatusEl.textContent = parts.join(" · ");
+    }
+
+    async function loadAutoSync() {
+      const s = await api("/api/settings/banking-bridge/auto-sync");
+      bbAutoSyncEnabledEl.checked = !!s.enabled;
+      bbAutoSyncIntervalEl.value = s.interval_minutes != null ? s.interval_minutes : 30;
+      if (s.min_interval_minutes != null) bbAutoSyncIntervalEl.min = s.min_interval_minutes;
+      if (s.max_interval_minutes != null) bbAutoSyncIntervalEl.max = s.max_interval_minutes;
+      renderAutoSyncStatus(s);
+    }
+
+    async function saveAutoSync() {
+      const enabled = !!bbAutoSyncEnabledEl.checked;
+      let interval = parseInt(bbAutoSyncIntervalEl.value, 10);
+      if (!Number.isFinite(interval) || interval < 1) interval = 1;
+      if (interval > 1440) interval = 1440;
+      setBbStatus("info", "Speichere Auto-Sync-Einstellungen...");
+      const s = await api("/api/settings/banking-bridge/auto-sync", {
+        method: "PUT",
+        body: JSON.stringify({ enabled, interval_minutes: interval }),
+      });
+      renderAutoSyncStatus(s);
+      setBbStatus("success", `Auto-Sync ${enabled ? "aktiviert" : "deaktiviert"} (Intervall: ${s.interval_minutes} min).`);
+    }
+
+    async function runAutoSyncNow() {
+      setBbStatus("info", "Starte Auto-Sync für alle verknüpften Depots...");
+      runAutoSyncBtn.disabled = true;
+      try {
+        const res = await api("/api/banking-bridge/auto-sync/run", { method: "POST" });
+        const okN = res.ok || 0;
+        const errN = res.errors || 0;
+        const total = res.portfolios || 0;
+        const level = errN === 0 ? "success" : (okN === 0 ? "error" : "warn");
+        setBbStatus(level, `Auto-Sync abgeschlossen: ${okN}/${total} OK${errN ? ", " + errN + " Fehler" : ""}.`);
+        const s = await api("/api/settings/banking-bridge/auto-sync");
+        renderAutoSyncStatus(s);
+      } catch (e) {
+        setBbStatus("error", `Auto-Sync fehlgeschlagen: ${e.message || e}`);
+      } finally {
+        runAutoSyncBtn.disabled = false;
+      }
+    }
+
+    saveAutoSyncBtn.onclick = () => saveAutoSync().catch(e => setBbStatus("error", String(e.message || e)));
+    runAutoSyncBtn.onclick = () => runAutoSyncNow();
+
+    Promise.all([loadMqttStatus(), loadMqttConfig(), loadBbConfig(), loadAutoSync()])
       .then(() => setStatus("success", "Bereit."))
       .catch(e => setStatus("error", String(e.message || e)));
   </script>
